@@ -20,7 +20,7 @@ cargo run -- configure
 
 The password is never written to this repository, the TOML configuration, SQLite, or logs.
 
-Create the first maintenance-portal administrator with a separate portal password:
+Start the service, open `http://127.0.0.1:3030` in a browser on the host Mac, and use the first-run form to create the initial administrator. For security, first-run setup is not available over the LAN. The terminal command remains available as an alternative:
 
 ```bash
 cargo run -- portal-admin --email you@example.com --name "Your Name"

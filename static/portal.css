@@ -50,6 +50,8 @@ button { color: inherit; }
 .login-form > p:not(.eyebrow), .setup-notice p { margin: 0 0 2rem; color: var(--muted); line-height: 1.6; }
 .setup-notice code { display: block; padding: 1rem; border: 1px solid var(--line); border-radius: .65rem; background: #050c13; color: #a9e9ee; white-space: normal; word-break: break-word; }
 .setup-notice > span { display: inline-block; padding: .32rem .55rem; border-radius: 1rem; background: var(--amber); color: #211805; font-size: .65rem; font-weight: 800; letter-spacing: .14em; }
+.setup-notice form p { margin-bottom: 1rem; }
+.setup-notice .primary-button { width: 100%; margin-top: .55rem; }
 
 label { display: flex; flex-direction: column; gap: .45rem; margin: 1rem 0; color: #b7cad4; font-size: .76rem; font-weight: 650; letter-spacing: .025em; }
 input, select, textarea { width: 100%; border: 1px solid var(--line-strong); border-radius: .58rem; outline: 0; background: #07131e; color: var(--text); padding: .78rem .85rem; transition: border-color .15s, box-shadow .15s, background .15s; }

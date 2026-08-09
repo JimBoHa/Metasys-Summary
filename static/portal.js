@@ -31,6 +31,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 });
 
 function bindEvents() {
+  $("setup-form").addEventListener("submit", bootstrapAdministrator);
   $("login-form").addEventListener("submit", signIn);
   $("logout-button").addEventListener("click", signOut);
   document.querySelectorAll(".nav-button").forEach((button) => {
@@ -75,6 +76,8 @@ async function initializePortal() {
     const status = await request("/api/portal/status", { allowUnauthorized: true });
     if (!status.initialized) {
       $("setup-notice").hidden = false;
+      $("setup-form").hidden = !status.bootstrapAllowed;
+      $("setup-local-only").hidden = status.bootstrapAllowed;
       $("login-form").hidden = true;
       return;
     }
@@ -86,6 +89,38 @@ async function initializePortal() {
     }
   } catch (error) {
     showLoginMessage(error.message || "Portal service unavailable", true);
+  }
+}
+
+async function bootstrapAdministrator(event) {
+  event.preventDefault();
+  const button = $("setup-button");
+  const password = $("setup-password").value;
+  const passwordConfirmation = $("setup-password-confirmation").value;
+  if (password !== passwordConfirmation) {
+    showFormMessage("setup-message", "Password confirmation does not match.", true);
+    return;
+  }
+  button.disabled = true;
+  showFormMessage("setup-message", "Creating administrator…");
+  try {
+    const session = await request("/api/portal/bootstrap", {
+      method: "POST",
+      body: {
+        displayName: $("setup-display-name").value,
+        email: $("setup-email").value,
+        password,
+        passwordConfirmation
+      },
+      allowUnauthorized: true
+    });
+    $("setup-password").value = "";
+    $("setup-password-confirmation").value = "";
+    await enterPortal(session);
+  } catch (error) {
+    showFormMessage("setup-message", error.message || "Unable to create administrator", true);
+  } finally {
+    button.disabled = false;
   }
 }
 

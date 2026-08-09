@@ -96,6 +96,15 @@ pub struct LoginRequest {
     pub password: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapRequest {
+    pub email: String,
+    pub display_name: String,
+    pub password: String,
+    pub password_confirmation: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionView {

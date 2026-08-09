@@ -4,13 +4,15 @@ The maintenance portal is the root page of the Rust service. It uses the same lo
 
 ## 1. Create the first administrator
 
-Run this on the host Mac. The password prompt is hidden and the resulting Argon2id hash—not the password—is stored in SQLite.
+Start the service and open `http://127.0.0.1:3030` in a browser running on the host Mac. Complete the first-run form; setup is deliberately unavailable through the Mac's LAN address so another network user cannot claim the installation. The resulting Argon2id hash—not the password—is stored in SQLite.
+
+The hidden terminal prompt is also available:
 
 ```bash
 cargo run -- portal-admin --email you@example.com --name "Your Name"
 ```
 
-Then open `http://127.0.0.1:3030` and sign in. Additional users are created from **Administration → Users & access**.
+The browser form signs in the new administrator immediately. If the terminal command was used, open the portal and sign in. Additional users are created from **Administration → Users & access**.
 
 ## 2. Create the site hierarchy
 

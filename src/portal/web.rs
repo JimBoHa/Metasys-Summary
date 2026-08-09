@@ -21,8 +21,8 @@ use super::{
     },
     floorplan::{MAX_PDF_BYTES, process_pdf},
     models::{
-        AddNoteRequest, BuildingInput, CreateServiceRequest, CreateUserRequest, FloorInput,
-        LoginRequest, PortalRole, PortalSession, RegionInput, SessionView, TraceUpdate,
+        AddNoteRequest, BootstrapRequest, BuildingInput, CreateServiceRequest, CreateUserRequest,
+        FloorInput, LoginRequest, PortalRole, PortalSession, RegionInput, SessionView, TraceUpdate,
         UpdateRequestStatus, UpdateUserRequest,
     },
     store::SaveFloorPlan,
@@ -39,6 +39,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/portal.js", get(portal_javascript))
         .route("/portal.css", get(portal_stylesheet))
         .route("/api/portal/status", get(portal_status))
+        .route("/api/portal/bootstrap", post(bootstrap))
         .route("/api/portal/login", post(login))
         .route("/api/portal/logout", post(logout))
         .route("/api/portal/me", get(current_session))
@@ -107,14 +108,88 @@ async fn portal_stylesheet() -> Response {
 }
 
 async fn portal_status(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, PortalError> {
     let initialized = state
         .store()
         .portal_user_count()
         .map_err(PortalError::internal)?
         > 0;
-    Ok(Json(json!({"initialized": initialized})))
+    Ok(Json(json!({
+        "initialized": initialized,
+        "bootstrapAllowed": !initialized && local_bootstrap_request(peer, &headers),
+    })))
+}
+
+async fn bootstrap(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(input): Json<BootstrapRequest>,
+) -> Result<Response, PortalError> {
+    require_same_site(&headers)?;
+    if !local_bootstrap_request(peer, &headers) {
+        return Err(PortalError::new(
+            StatusCode::FORBIDDEN,
+            "Initial setup must be completed at http://127.0.0.1:3030 on the host Mac",
+        ));
+    }
+    if state
+        .store()
+        .portal_user_count()
+        .map_err(PortalError::internal)?
+        > 0
+    {
+        return Err(PortalError::new(
+            StatusCode::CONFLICT,
+            "The maintenance portal is already initialized",
+        ));
+    }
+    validate_user(&input.email, &input.display_name).map_err(PortalError::bad_request)?;
+    if input.password != input.password_confirmation {
+        return Err(PortalError::bad_request(anyhow!(
+            "password confirmation does not match"
+        )));
+    }
+    let password = input.password;
+    let password_hash = tokio::task::spawn_blocking(move || hash_password(&password))
+        .await
+        .map_err(|error| PortalError::internal(anyhow!("password task failed: {error}")))?
+        .map_err(PortalError::bad_request)?;
+    let token = random_token();
+    let csrf_token = random_token();
+    let peer_ip = peer.ip().to_string();
+    let user = state
+        .store()
+        .create_initial_portal_admin(
+            &input.email,
+            &input.display_name,
+            &password_hash,
+            &token_hash(&token),
+            &csrf_token,
+            &peer_ip,
+        )
+        .map_err(PortalError::internal)?
+        .ok_or_else(|| {
+            PortalError::new(
+                StatusCode::CONFLICT,
+                "The maintenance portal is already initialized",
+            )
+        })?;
+    let mut response = Json(SessionView {
+        user,
+        csrf_token,
+        initialized: true,
+    })
+    .into_response();
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&session_cookie(&token, request_is_secure(&headers)))
+            .map_err(PortalError::internal)?,
+    );
+    Ok(response)
 }
 
 async fn login(
@@ -689,6 +764,26 @@ fn require_same_site(headers: &HeaderMap) -> Result<(), PortalError> {
         return Err(PortalError::forbidden());
     }
     Ok(())
+}
+
+fn local_bootstrap_request(peer: SocketAddr, headers: &HeaderMap) -> bool {
+    peer.ip().is_loopback()
+        && headers
+            .get(header::HOST)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(local_host_header)
+}
+
+fn local_host_header(host: &str) -> bool {
+    let host = host.trim().to_ascii_lowercase();
+    ["localhost", "127.0.0.1", "[::1]"].iter().any(|candidate| {
+        host == *candidate
+            || host.strip_prefix(candidate).is_some_and(|suffix| {
+                suffix.strip_prefix(':').is_some_and(|port| {
+                    !port.is_empty() && port.chars().all(|c| c.is_ascii_digit())
+                })
+            })
+    })
 }
 
 fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {

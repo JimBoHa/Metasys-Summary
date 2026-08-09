@@ -214,6 +214,73 @@ impl Store {
         self.portal_user_view(&id)
     }
 
+    pub fn create_initial_portal_admin(
+        &self,
+        email: &str,
+        display_name: &str,
+        password_hash: &str,
+        session_token_hash: &str,
+        csrf_token: &str,
+        peer: &str,
+    ) -> Result<Option<PortalUserView>> {
+        let id = Uuid::new_v4().to_string();
+        let normalized_email = email.trim().to_ascii_lowercase();
+        let normalized_name = display_name.trim().to_owned();
+        let now = Utc::now();
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let existing = transaction.query_row("SELECT COUNT(*) FROM portal_users", [], |row| {
+            row.get::<_, i64>(0)
+        })?;
+        if existing > 0 {
+            return Ok(None);
+        }
+        transaction
+            .execute(
+                r#"
+                INSERT INTO portal_users (
+                    id, email, display_name, role, password_hash, active, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, 'admin', ?4, 1, ?5, ?5)
+                "#,
+                params![
+                    id,
+                    normalized_email,
+                    normalized_name,
+                    password_hash,
+                    now.to_rfc3339(),
+                ],
+            )
+            .context("create initial portal administrator")?;
+        transaction
+            .execute(
+                r#"
+                INSERT INTO portal_sessions (
+                    token_hash, user_id, csrf_token, peer_address,
+                    created_at, last_seen_at, expires_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)
+                "#,
+                params![
+                    session_token_hash,
+                    id,
+                    csrf_token,
+                    peer,
+                    now.to_rfc3339(),
+                    (now + Duration::hours(SESSION_HOURS)).to_rfc3339(),
+                ],
+            )
+            .context("create initial administrator session")?;
+        transaction.commit()?;
+        Ok(Some(PortalUserView {
+            id,
+            email: normalized_email,
+            display_name: normalized_name,
+            role: PortalRole::Admin,
+            active: true,
+            floor_ids: Vec::new(),
+            region_ids: Vec::new(),
+        }))
+    }
+
     pub fn portal_user_for_login(&self, email: &str) -> Result<Option<PortalUserRecord>> {
         let connection = self.lock()?;
         let tuple: Option<(String, String, String, String, String, bool)> = connection

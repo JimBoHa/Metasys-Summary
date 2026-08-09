@@ -292,7 +292,7 @@ mod tests {
         Router,
         body::{Body, to_bytes},
         extract::ConnectInfo,
-        http::{Method, Request, StatusCode, header},
+        http::{HeaderValue, Method, Request, StatusCode, header},
         response::Response,
     };
     use serde_json::{Value, json};
@@ -343,7 +343,9 @@ mod tests {
         login: Option<&Login>,
     ) -> Request<Body> {
         let mut builder = Request::builder().method(method).uri(path);
-        builder = builder.header("sec-fetch-site", "same-origin");
+        builder = builder
+            .header(header::HOST, "127.0.0.1:3030")
+            .header("sec-fetch-site", "same-origin");
         if let Some(login) = login {
             builder = builder
                 .header(header::COOKIE, &login.cookie)
@@ -396,6 +398,111 @@ mod tests {
             cookie,
             csrf: body["csrfToken"].as_str().unwrap().to_owned(),
         }
+    }
+
+    #[tokio::test]
+    async fn portal_bootstrap_is_local_and_single_use() {
+        let directory = tempdir().unwrap();
+        let database_path = directory.path().join("bootstrap.sqlite3");
+        let store = Arc::new(Store::open(&database_path).unwrap());
+        let state =
+            Arc::new(AppState::new(Arc::new(test_config(&database_path)), store.clone()).unwrap());
+        let app = router(state);
+
+        let response = call(&app, request(Method::GET, "/api/portal/status", None, None)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let status = json_body(response).await;
+        assert_eq!(status["initialized"], false);
+        assert_eq!(status["bootstrapAllowed"], true);
+
+        let body = json!({
+            "displayName": "Initial Administrator",
+            "email": "initial-admin@example.test",
+            "password": "Portal-Bootstrap-47!",
+            "passwordConfirmation": "Portal-Bootstrap-47!"
+        });
+        let mut lan_host = request(
+            Method::POST,
+            "/api/portal/bootstrap",
+            Some(body.clone()),
+            None,
+        );
+        lan_host
+            .headers_mut()
+            .insert(header::HOST, HeaderValue::from_static("10.255.0.24:3030"));
+        assert_eq!(call(&app, lan_host).await.status(), StatusCode::FORBIDDEN);
+
+        let mut remote_peer = request(
+            Method::POST,
+            "/api/portal/bootstrap",
+            Some(body.clone()),
+            None,
+        );
+        remote_peer
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from((
+                Ipv4Addr::new(192, 0, 2, 10),
+                41000,
+            ))));
+        assert_eq!(
+            call(&app, remote_peer).await.status(),
+            StatusCode::FORBIDDEN
+        );
+
+        let response = call(
+            &app,
+            request(
+                Method::POST,
+                "/api/portal/bootstrap",
+                Some(body.clone()),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let session = json_body(response).await;
+        assert_eq!(session["initialized"], true);
+        assert_eq!(session["user"]["role"], "admin");
+        assert_eq!(session["user"]["email"], "initial-admin@example.test");
+        assert_eq!(store.portal_user_count().unwrap(), 1);
+
+        let login = Login {
+            cookie,
+            csrf: session["csrfToken"].as_str().unwrap().to_owned(),
+        };
+        assert_eq!(
+            call(
+                &app,
+                request(Method::GET, "/api/portal/me", None, Some(&login)),
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+
+        let response = call(&app, request(Method::GET, "/api/portal/status", None, None)).await;
+        let status = json_body(response).await;
+        assert_eq!(status["initialized"], true);
+        assert_eq!(status["bootstrapAllowed"], false);
+        assert_eq!(
+            call(
+                &app,
+                request(Method::POST, "/api/portal/bootstrap", Some(body), None,),
+            )
+            .await
+            .status(),
+            StatusCode::CONFLICT
+        );
     }
 
     #[tokio::test]

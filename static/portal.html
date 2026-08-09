@@ -26,8 +26,19 @@
       <div id="setup-notice" class="setup-notice" hidden>
         <span>INITIAL SETUP</span>
         <h1>Create the first administrator</h1>
-        <p>Run this command in Terminal on the host Mac, then reload this page:</p>
-        <code>metasys-dashboard portal-admin --email you@example.com --name "Your Name"</code>
+        <form id="setup-form" hidden>
+          <p>This first account has full access to buildings, floor plans, users, requests, and operations data.</p>
+          <label>Display name<input id="setup-display-name" autocomplete="name" required maxlength="120"></label>
+          <label>Email address<input id="setup-email" type="email" autocomplete="username" required maxlength="254"></label>
+          <label>Password<input id="setup-password" type="password" autocomplete="new-password" required minlength="12" maxlength="256"><small>Use at least 12 characters and mix character types.</small></label>
+          <label>Confirm password<input id="setup-password-confirmation" type="password" autocomplete="new-password" required minlength="12" maxlength="256"></label>
+          <div id="setup-message" class="form-message" role="status" aria-live="polite"></div>
+          <button id="setup-button" class="primary-button" type="submit">Create administrator</button>
+        </form>
+        <div id="setup-local-only" hidden>
+          <p>For security, create the first administrator from a browser running on the server Mac. Open this address there:</p>
+          <code>http://127.0.0.1:3030</code>
+        </div>
       </div>
       <form id="login-form" class="login-form">
         <p class="eyebrow">SECURE ACCESS</p>
