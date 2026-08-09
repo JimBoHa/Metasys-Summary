@@ -165,6 +165,29 @@ impl AppState {
             .view(config.password.is_some())
     }
 
+    pub async fn hydrate_metasys_password(
+        &self,
+        expected_service: &str,
+        expected_username: &str,
+        password: String,
+    ) -> Result<bool> {
+        let _poll_guard = self.poll_lock.lock().await;
+        let current_config = self.config.read().await.clone();
+        if current_config.password.is_some()
+            || current_config.keychain_service != expected_service
+            || current_config.username != expected_username
+        {
+            return Ok(false);
+        }
+        let mut replacement_config = current_config.as_ref().clone();
+        replacement_config.password = Some(password);
+        let replacement_config = Arc::new(replacement_config);
+        let replacement_client = Arc::new(MetasysClient::new(replacement_config.clone())?);
+        *self.config.write().await = replacement_config;
+        *self.client.write().await = replacement_client;
+        Ok(true)
+    }
+
     pub async fn update_metasys_connection(
         &self,
         update: MetasysConnectionUpdate,

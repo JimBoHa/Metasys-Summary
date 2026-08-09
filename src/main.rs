@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use metasys_dashboard::{
     app::AppState,
-    config::{BROWSER_KEYCHAIN_SERVICE, Config, load_password, store_password},
+    config::{Config, ConnectorPreference, load_password, store_password},
     metasys::MetasysClient,
     portal::{auth::hash_password, models::PortalRole},
     store::Store,
@@ -162,21 +162,42 @@ async fn serve(mut config: Config, cli_open_browser: bool) -> Result<()> {
     let store = Arc::new(Store::open(&config.database_path)?);
     if let Some(settings) = store.metasys_connection_settings()? {
         settings.validate()?;
-        let password = config
-            .password
-            .clone()
-            .or_else(|| load_password(BROWSER_KEYCHAIN_SERVICE, &settings.username));
+        let password = config.password.take();
         config.apply_metasys_connection(&settings, password);
-    } else {
-        config.hydrate_password();
     }
+    let startup_keychain = (config.password.is_none()
+        && config.connector != ConnectorPreference::Demo)
+        .then(|| (config.keychain_service.clone(), config.username.clone()));
     let config = Arc::new(config);
     let state = Arc::new(AppState::new(config.clone(), store)?);
+
+    let address = (config.bind_address, config.port);
+    let listener = TcpListener::bind(address)
+        .await
+        .with_context(|| format!("bind dashboard to {}:{}", address.0, address.1))?;
+
+    let startup_poll_state = state.clone();
+    tokio::spawn(async move {
+        if let Some((service, username)) = startup_keychain {
+            let lookup_service = service.clone();
+            let lookup_username = username.clone();
+            if let Ok(Some(password)) = tokio::task::spawn_blocking(move || {
+                load_password(&lookup_service, &lookup_username)
+            })
+            .await
+                && let Err(error) = startup_poll_state
+                    .hydrate_metasys_password(&service, &username, password)
+                    .await
+            {
+                tracing::warn!(error = %error, "could not activate Keychain Metasys credential");
+            }
+        }
+        startup_poll_state.poll_once().await;
+    });
 
     let poll_state = state.clone();
     let poll_interval = config.poll_interval_seconds;
     tokio::spawn(async move {
-        poll_state.poll_once().await;
         let mut interval = tokio::time::interval(Duration::from_secs(poll_interval));
         interval.tick().await;
         loop {
@@ -195,10 +216,6 @@ async fn serve(mut config: Config, cli_open_browser: bool) -> Result<()> {
         }
     });
 
-    let address = (config.bind_address, config.port);
-    let listener = TcpListener::bind(address)
-        .await
-        .with_context(|| format!("bind dashboard to {}:{}", address.0, address.1))?;
     let local_url = format!("http://127.0.0.1:{}", config.port);
     tracing::info!(url = %local_url, bind = %listener.local_addr()?, "Metasys dashboard ready");
     println!("Metasys Dashboard: {local_url}");
