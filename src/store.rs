@@ -1,0 +1,255 @@
+use std::{path::Path, sync::Mutex};
+
+use anyhow::{Context, Result, anyhow};
+use chrono::{DateTime, Duration, Utc};
+use rusqlite::{Connection, OptionalExtension, params};
+
+use crate::models::AlarmRecord;
+
+pub struct Store {
+    connection: Mutex<Connection>,
+}
+
+impl Store {
+    pub fn open(path: &Path) -> Result<Self> {
+        let connection = Connection::open(path)
+            .with_context(|| format!("open SQLite database {}", path.display()))?;
+        connection
+            .execute_batch(
+                r#"
+                PRAGMA journal_mode = WAL;
+                PRAGMA synchronous = NORMAL;
+                PRAGMA foreign_keys = ON;
+
+                CREATE TABLE IF NOT EXISTS alarms (
+                    id TEXT PRIMARY KEY,
+                    object_id TEXT NOT NULL,
+                    equipment TEXT NOT NULL,
+                    point TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    alarm_type TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    priority INTEGER NOT NULL,
+                    occurred_at TEXT NOT NULL,
+                    active INTEGER NOT NULL,
+                    acknowledged INTEGER NOT NULL,
+                    occurrence_count INTEGER NOT NULL DEFAULT 1,
+                    source TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_alarms_occurred_at
+                    ON alarms(occurred_at);
+                CREATE INDEX IF NOT EXISTS idx_alarms_equipment
+                    ON alarms(equipment);
+
+                CREATE TABLE IF NOT EXISTS poll_log (
+                    attempted_at TEXT PRIMARY KEY,
+                    succeeded INTEGER NOT NULL,
+                    active_alarm_count INTEGER NOT NULL,
+                    override_count INTEGER NOT NULL,
+                    error_message TEXT
+                );
+                "#,
+            )
+            .context("initialize SQLite schema")?;
+
+        ensure_occurrence_column(&connection)?;
+        Ok(Self {
+            connection: Mutex::new(connection),
+        })
+    }
+
+    pub fn upsert_alarms(&self, alarms: &[AlarmRecord]) -> Result<()> {
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction()
+            .context("begin alarm transaction")?;
+        let now = Utc::now().to_rfc3339();
+        {
+            let mut statement = transaction.prepare_cached(
+                r#"
+                INSERT INTO alarms (
+                    id, object_id, equipment, point, message, alarm_type, category,
+                    priority, occurred_at, active, acknowledged, occurrence_count,
+                    source, last_seen_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                ON CONFLICT(id) DO UPDATE SET
+                    object_id = excluded.object_id,
+                    equipment = excluded.equipment,
+                    point = excluded.point,
+                    message = excluded.message,
+                    alarm_type = excluded.alarm_type,
+                    category = excluded.category,
+                    priority = excluded.priority,
+                    occurred_at = excluded.occurred_at,
+                    active = excluded.active,
+                    acknowledged = excluded.acknowledged,
+                    occurrence_count = MAX(alarms.occurrence_count, excluded.occurrence_count),
+                    source = excluded.source,
+                    last_seen_at = excluded.last_seen_at
+                "#,
+            )?;
+
+            for alarm in alarms {
+                statement.execute(params![
+                    alarm.id,
+                    alarm.object_id,
+                    alarm.equipment,
+                    alarm.point,
+                    alarm.message,
+                    alarm.alarm_type,
+                    alarm.category,
+                    i64::from(alarm.priority),
+                    alarm.occurred_at.to_rfc3339(),
+                    alarm.active,
+                    alarm.acknowledged,
+                    alarm.occurrence_count as i64,
+                    alarm.source,
+                    now,
+                ])?;
+            }
+        }
+        transaction.commit().context("commit alarm transaction")
+    }
+
+    pub fn record_poll(
+        &self,
+        succeeded: bool,
+        active_alarm_count: usize,
+        override_count: usize,
+        error_message: Option<&str>,
+    ) -> Result<()> {
+        let connection = self.lock()?;
+        connection.execute(
+            r#"
+            INSERT INTO poll_log (
+                attempted_at, succeeded, active_alarm_count, override_count, error_message
+            ) VALUES (?1, ?2, ?3, ?4, ?5)
+            "#,
+            params![
+                Utc::now().to_rfc3339(),
+                succeeded,
+                active_alarm_count as i64,
+                override_count as i64,
+                error_message,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn alarms_since(&self, since: DateTime<Utc>) -> Result<Vec<AlarmRecord>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            r#"
+            SELECT id, object_id, equipment, point, message, alarm_type, category,
+                   priority, occurred_at, active, acknowledged, occurrence_count, source
+            FROM alarms
+            WHERE occurred_at >= ?1
+            ORDER BY occurred_at DESC
+            "#,
+        )?;
+        let rows = statement.query_map([since.to_rfc3339()], |row| {
+            let occurred_at: String = row.get(8)?;
+            Ok(AlarmRecord {
+                id: row.get(0)?,
+                object_id: row.get(1)?,
+                equipment: row.get(2)?,
+                point: row.get(3)?,
+                message: row.get(4)?,
+                alarm_type: row.get(5)?,
+                category: row.get(6)?,
+                priority: row.get::<_, i64>(7)?.clamp(0, 255) as u16,
+                occurred_at: DateTime::parse_from_rfc3339(&occurred_at)
+                    .map(|value| value.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+                active: row.get(9)?,
+                acknowledged: row.get(10)?,
+                occurrence_count: row.get::<_, i64>(11)?.max(1) as u64,
+                source: row.get(12)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("read alarm history")
+    }
+
+    pub fn first_alarm_at(&self) -> Result<Option<DateTime<Utc>>> {
+        let connection = self.lock()?;
+        let value: Option<String> = connection
+            .query_row("SELECT MIN(occurred_at) FROM alarms", [], |row| row.get(0))
+            .optional()?
+            .flatten();
+        Ok(value.and_then(|timestamp| {
+            DateTime::parse_from_rfc3339(&timestamp)
+                .ok()
+                .map(|value| value.with_timezone(&Utc))
+        }))
+    }
+
+    pub fn prune(&self, retention_days: i64) -> Result<()> {
+        let connection = self.lock()?;
+        let cutoff = (Utc::now() - Duration::days(retention_days.max(31))).to_rfc3339();
+        connection.execute("DELETE FROM alarms WHERE occurred_at < ?1", [&cutoff])?;
+        connection.execute("DELETE FROM poll_log WHERE attempted_at < ?1", [&cutoff])?;
+        Ok(())
+    }
+
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+        self.connection
+            .lock()
+            .map_err(|_| anyhow!("SQLite connection lock poisoned"))
+    }
+}
+
+fn ensure_occurrence_column(connection: &Connection) -> Result<()> {
+    let mut statement = connection.prepare("PRAGMA table_info(alarms)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !columns.iter().any(|column| column == "occurrence_count") {
+        connection.execute(
+            "ALTER TABLE alarms ADD COLUMN occurrence_count INTEGER NOT NULL DEFAULT 1",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use tempfile::tempdir;
+
+    use super::Store;
+    use crate::models::AlarmRecord;
+
+    #[test]
+    fn upserts_without_duplicating_alarm() {
+        let directory = tempdir().unwrap();
+        let store = Store::open(&directory.path().join("test.sqlite3")).unwrap();
+        let mut alarm = AlarmRecord {
+            id: "alarm-1".to_owned(),
+            object_id: "point-1".to_owned(),
+            equipment: "AHU-1".to_owned(),
+            point: "SAT".to_owned(),
+            message: "High temperature".to_owned(),
+            alarm_type: "avHighLimit".to_owned(),
+            category: "hvacCategory".to_owned(),
+            priority: 40,
+            occurred_at: Utc::now(),
+            active: true,
+            acknowledged: false,
+            occurrence_count: 1,
+            source: "test".to_owned(),
+        };
+        store.upsert_alarms(&[alarm.clone()]).unwrap();
+        alarm.occurrence_count = 4;
+        store.upsert_alarms(&[alarm]).unwrap();
+
+        let alarms = store
+            .alarms_since(Utc::now() - chrono::Duration::days(1))
+            .unwrap();
+        assert_eq!(alarms.len(), 1);
+        assert_eq!(alarms[0].occurrence_count, 4);
+    }
+}

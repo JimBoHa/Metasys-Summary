@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'">
+  <title>Metasys Operations Dashboard</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Metasys Operations dashboard home">
+      <span class="brand-mark" aria-hidden="true">
+        <span></span><span></span><span></span>
+      </span>
+      <span>
+        <span class="brand-kicker">INFRA / METASYS</span>
+        <span class="brand-name">Operations Dashboard</span>
+      </span>
+    </a>
+    <div class="topbar-actions">
+      <div class="sync-meta">
+        <span id="health-badge" class="status-badge starting"><i></i> Connecting</span>
+        <span id="last-updated" class="last-updated">Waiting for first poll</span>
+      </div>
+      <button id="refresh-button" class="refresh-button" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6v5h-5M4 18v-5h5M18.7 9A7 7 0 0 0 6.1 6.1L4 8m16 8-2.1 1.9A7 7 0 0 1 5.3 15"/></svg>
+        <span>Refresh</span>
+      </button>
+    </div>
+  </header>
+
+  <main>
+    <section id="connection-banner" class="connection-banner" role="status" aria-live="polite" hidden>
+      <span class="banner-icon" aria-hidden="true">!</span>
+      <div>
+        <strong id="banner-title">Connection notice</strong>
+        <p id="banner-message"></p>
+      </div>
+    </section>
+
+    <section class="page-heading">
+      <div>
+        <p class="eyebrow">SITE PULSE</p>
+        <h1>Building systems at a glance</h1>
+        <p class="page-summary">Live alarm posture, operator interventions, and 30-day equipment patterns.</p>
+      </div>
+      <div class="connector-meta">
+        <span>DATA SOURCE</span>
+        <strong id="connector-name">Detecting…</strong>
+        <small id="server-version">Version unavailable</small>
+      </div>
+    </section>
+
+    <section class="metric-grid" aria-label="Current operational metrics">
+      <article class="metric-card alarm-card">
+        <div class="metric-heading"><span>Active alarms</span><span class="metric-spark danger"></span></div>
+        <strong id="metric-active">—</strong>
+        <p><span id="metric-critical">—</span> critical priority</p>
+      </article>
+      <article class="metric-card override-card">
+        <div class="metric-heading"><span>Operator overrides</span><span class="metric-spark amber"></span></div>
+        <strong id="metric-overrides">—</strong>
+        <p>Active interventions</p>
+      </article>
+      <article class="metric-card history-card">
+        <div class="metric-heading"><span>30-day alarms</span><span class="metric-spark cyan"></span></div>
+        <strong id="metric-history">—</strong>
+        <p id="history-coverage">Building history index</p>
+      </article>
+      <article class="metric-card equipment-card">
+        <div class="metric-heading"><span>Highest-risk asset</span><span class="metric-spark violet"></span></div>
+        <strong id="metric-equipment" class="metric-text">—</strong>
+        <p id="metric-equipment-detail">Waiting for alarm history</p>
+      </article>
+    </section>
+
+    <section class="dashboard-grid">
+      <article class="panel span-8">
+        <header class="panel-header">
+          <div><p class="panel-kicker">NOW</p><h2>Active alarms</h2></div>
+          <span id="active-count-label" class="panel-count">0 open</span>
+        </header>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Severity</th><th>Equipment / point</th><th>Condition</th><th>Priority</th><th>Detected</th></tr></thead>
+            <tbody id="active-alarms-body"><tr><td colspan="5" class="empty-cell">Loading active alarms…</td></tr></tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="panel span-4">
+        <header class="panel-header">
+          <div><p class="panel-kicker">INTERVENTIONS</p><h2>Active overrides</h2></div>
+          <span id="override-count-label" class="panel-count amber-count">0 active</span>
+        </header>
+        <div class="table-wrap compact-table">
+          <table>
+            <thead><tr><th>Equipment / point</th><th>Command</th><th>Expires</th></tr></thead>
+            <tbody id="overrides-body"><tr><td colspan="3" class="empty-cell">Loading overrides…</td></tr></tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="panel span-8 chart-panel">
+        <header class="panel-header">
+          <div><p class="panel-kicker">VELOCITY</p><h2>Alarm rate · 14 days</h2></div>
+          <div class="chart-key" aria-hidden="true"><span><i class="key-count"></i>Events</span><span><i class="key-average"></i>7-day mean</span></div>
+        </header>
+        <div class="chart-stage line-stage">
+          <canvas id="alarm-rate-chart" role="img" aria-label="Daily alarm rate for the last 14 days"></canvas>
+        </div>
+      </article>
+
+      <article class="panel span-4 chart-panel">
+        <header class="panel-header"><div><p class="panel-kicker">DISTRIBUTION</p><h2>Alarms by type</h2></div></header>
+        <div class="donut-layout">
+          <canvas id="type-chart" class="donut-chart" role="img" aria-label="Alarm distribution by type"></canvas>
+          <div id="type-legend" class="chart-legend"></div>
+        </div>
+      </article>
+
+      <article class="panel span-4 chart-panel">
+        <header class="panel-header"><div><p class="panel-kicker">CONTRIBUTION</p><h2>Alarms by equipment</h2></div></header>
+        <div class="donut-layout">
+          <canvas id="equipment-chart" class="donut-chart" role="img" aria-label="Alarm distribution by equipment"></canvas>
+          <div id="equipment-legend" class="chart-legend"></div>
+        </div>
+      </article>
+
+      <article class="panel span-4">
+        <header class="panel-header">
+          <div><p class="panel-kicker">REPEAT OFFENDERS</p><h2>Most frequent alarms</h2></div>
+          <span class="period-label">30 DAYS</span>
+        </header>
+        <div class="rank-list" id="frequent-list"><p class="empty-state">Loading frequency analysis…</p></div>
+      </article>
+
+      <article class="panel span-4">
+        <header class="panel-header">
+          <div><p class="panel-kicker">RISK</p><h2>Most serious alarms</h2></div>
+          <span class="period-label">30 DAYS</span>
+        </header>
+        <div class="rank-list" id="serious-list"><p class="empty-state">Loading severity analysis…</p></div>
+      </article>
+
+      <article class="panel span-8">
+        <header class="panel-header">
+          <div><p class="panel-kicker">ASSET HEALTH</p><h2>Most problematic equipment</h2></div>
+          <span class="period-label">COMPOSITE SCORE</span>
+        </header>
+        <div class="equipment-list" id="equipment-list"><p class="empty-state">Loading equipment analysis…</p></div>
+      </article>
+    </section>
+  </main>
+
+  <footer>
+    <span>Read-only monitoring dashboard</span>
+    <span id="footer-timestamp">No data received</span>
+  </footer>
+</body>
+</html>

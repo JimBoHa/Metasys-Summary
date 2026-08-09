@@ -1,0 +1,24 @@
+# Metasys connection. Password is intentionally not accepted here; store it in
+# macOS Keychain with `metasys-dashboard configure` or use METASYS_PASSWORD.
+server_url = "https://metasys.example.invalid"
+username = "metasys-api-user"
+domain = "Metasys Local"
+
+# auto probes the supported REST API first, then the legacy Metasys UI API.
+connector = "auto"
+api_version = "auto"
+
+# Use 0.0.0.0 to expose the dashboard on this Mac and its LAN addresses.
+# The safer default below restricts access to this Mac.
+bind_address = "127.0.0.1"
+port = 3030
+poll_interval_seconds = 60
+history_days = 30
+
+# Set true only when a private Metasys deployment uses an untrusted certificate.
+accept_invalid_certificates = false
+open_browser = false
+
+keychain_service = "io.github.metasys-summary.dashboard"
+max_alarm_records = 10000
+max_override_points = 5000
