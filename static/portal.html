@@ -168,32 +168,28 @@
             <aside class="editor-sidebar">
               <form id="floorplan-upload-form" class="admin-card compact-card">
                 <p class="eyebrow">SOURCE DRAWING</p><h2>Upload PDF</h2>
-                <p class="help-text">The first page is rendered locally on this Mac. Linework is auto-traced into walls, doors, cubicles, and furniture.</p>
+                <p class="help-text">The first PDF page is rendered locally on this Mac and used unchanged as the drawing background. Add service zones manually in the editor.</p>
                 <label>Map type<select id="plan-scope-type"><option value="floor">Floor plan</option><option value="building">Building overview</option></select></label>
                 <label>Building or floor<select id="plan-scope-id" required></select></label>
                 <label>Map name<input id="plan-name" required maxlength="160" placeholder="Building A · First floor"></label>
                 <label class="file-field">PDF drawing<input id="plan-pdf" type="file" accept="application/pdf,.pdf" required><span id="plan-file-label">Choose a PDF</span></label>
-                <button id="plan-upload-button" class="primary-button" type="submit">Upload and auto-trace</button>
+                <button id="plan-upload-button" class="primary-button" type="submit">Upload PDF background</button>
                 <div id="plan-upload-message" class="form-message" role="status"></div>
               </form>
 
               <div class="admin-card compact-card">
-                <p class="eyebrow">EDITOR</p><h2>Drawing tools</h2>
+                <p class="eyebrow">EDITOR</p><h2>Zone tools</h2>
                 <label>Edit map<select id="editor-plan-select"></select></label>
-                <label class="toggle-field"><input id="show-original-plan" type="checkbox" checked> Show original drawing</label>
+                <label class="toggle-field"><input id="show-original-plan" type="checkbox" checked> Show PDF background</label>
                 <div class="tool-grid">
                   <button class="tool-button active" data-tool="select" type="button">Select</button>
-                  <button class="tool-button" data-tool="wall" type="button">Wall</button>
-                  <button class="tool-button" data-tool="door" type="button">Door</button>
-                  <button class="tool-button" data-tool="cubicle" type="button">Cubicle</button>
-                  <button class="tool-button" data-tool="furniture" type="button">Furniture</button>
                   <button class="tool-button" data-tool="region" type="button">Region</button>
                 </div>
-                <p id="editor-hint" class="help-text">Select traced lines or regions. Drag endpoints to adjust them.</p>
+                <p id="editor-hint" class="help-text">Select a zone to edit it, or choose Region and click around a service area.</p>
                 <div class="form-actions stack-actions">
                   <button id="finish-region-button" class="secondary-button" type="button" hidden>Finish region boundary</button>
                   <button id="delete-selection-button" class="danger-button" type="button" disabled>Delete selected item</button>
-                  <button id="save-trace-button" class="primary-button" type="button">Save traced drawing</button>
+                  <button id="save-trace-button" class="primary-button" type="button" hidden>Save drawing lines</button>
                 </div>
               </div>
 

@@ -346,7 +346,7 @@ function renderHome() {
   setText("home-title", building.name);
   setText("overview-title", building.name);
   setText("overview-floor-count", `${building.floors.length} floor${building.floors.length === 1 ? "" : "s"}`);
-  renderPlan($("building-overview-map"), building.overviewPlan, [], { original: false });
+  renderPlan($("building-overview-map"), building.overviewPlan, []);
   const cards = $("floor-cards");
   cards.replaceChildren();
   building.floors.forEach((floor) => {
@@ -381,7 +381,6 @@ function renderFloor() {
     tabs.append(button);
   });
   renderPlan($("floor-map"), floor.floorPlan, floor.regions, {
-    original: false,
     onRegion: showRegionDetails
   });
   const panel = $("region-panel");
@@ -431,7 +430,7 @@ function renderPlan(container, plan, regions, options = {}) {
   svg.setAttribute("role", "img");
   svg.setAttribute("aria-label", plan.name);
   const image = svgElement("image", "plan-image");
-  if (options.original) image.classList.add("visible-original");
+  image.classList.add("visible-original");
   image.setAttribute("href", plan.imageUrl);
   image.setAttribute("width", String(plan.width));
   image.setAttribute("height", String(plan.height));
@@ -856,14 +855,14 @@ async function uploadFloorPlan(event) {
   data.append("scopeId", $("plan-scope-id").value);
   data.append("name", $("plan-name").value);
   data.append("pdf", $("plan-pdf").files[0]);
-  showFormMessage("plan-upload-message", "Rendering and tracing the first PDF page…");
+  showFormMessage("plan-upload-message", "Rendering the first PDF page as a background…");
   await runButton(button, async () => {
     try {
       await request("/api/portal/admin/floorplans", { method: "POST", body: data });
       form.reset();
       updateFileLabel();
       await loadMap();
-      showFormMessage("plan-upload-message", "Floor plan uploaded and auto-traced.");
+      showFormMessage("plan-upload-message", "PDF background uploaded. You can now draw service zones.");
     } catch (error) {
       showFormMessage("plan-upload-message", error.message, true);
     }
@@ -964,7 +963,7 @@ function syncToolButtons() {
     button.classList.toggle("active", button.dataset.tool === app.editor.tool);
   });
   const hints = {
-    select: "Select traced lines or regions. Drag endpoints to adjust them.",
+    select: "Select a zone and drag its points to adjust the boundary.",
     wall: "Click two points to draw a wall.",
     door: "Click two points to draw a door.",
     cubicle: "Click two points to draw a cubicle partition.",
@@ -1181,7 +1180,7 @@ async function saveTrace() {
     const key = app.editor.key;
     await loadMap();
     selectEditorPlan(key);
-    showGlobalMessage("Clean traced drawing saved.");
+    showGlobalMessage("Drawing lines saved.");
   });
 }
 

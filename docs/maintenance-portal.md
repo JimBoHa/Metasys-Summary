@@ -26,24 +26,16 @@ In **Administration → Buildings & floors**:
 
 The portal hides unassigned buildings and floors in both the interface and API responses.
 
-## 3. Upload and simplify drawings
+## 3. Upload PDF backgrounds
 
 In **Administration → Floor-plan editor**, upload:
 
 - one building-overview PDF for the portal home page; and
 - one PDF for each floor that will contain service regions.
 
-The upload limit is 25 MB. The app renders the first page locally with the native macOS PDF renderer, reduces it to at most 1,800 pixels on either axis, and detects dark horizontal and vertical linework. It classifies candidate lines as walls, doors, cubicle partitions, or furniture based on length and line weight. No drawing or extracted image leaves the Mac.
+The upload limit is 25 MB. The app renders the first page locally with the native macOS PDF renderer and reduces it to at most 1,800 pixels on either axis. The rendered page is used directly as the map background; the app does not generate wall, door, cubicle, or furniture traces. No drawing or extracted image leaves the Mac.
 
-Automatic tracing is intentionally a starting point. Review it in the editor:
-
-- toggle **Show original drawing** to compare the source and clean trace;
-- select a line and choose a category to reclassify it;
-- drag endpoints to correct geometry;
-- add missing linework or delete unwanted features; and
-- select **Save traced drawing** when complete.
-
-Text, title blocks, dimensions, and other source detail remain faintly available only when the original-drawing toggle is on. The normal building and floor views display the clean trace.
+Use **Show PDF background** in the editor to show or hide the source while adjusting service-zone boundaries. The normal building and floor views display the PDF background beneath any manually drawn regions.
 
 ## 4. Draw service regions and map temperature points
 

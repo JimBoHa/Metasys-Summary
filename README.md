@@ -63,7 +63,7 @@ Optional login-time background service:
 ## Dashboard sections
 
 - Whole-building and floor views based on administrator-uploaded PDF plans
-- Editable automatic traces for walls, doors, cubicles, and furniture
+- PDF plans displayed directly as map backgrounds with manually drawn service regions
 - Named service regions with FAV and Metasys point mappings
 - Live Metasys temperature overlays with no generated-data fallback
 - Scoped admin, view-only, operator, and reporting-staff accounts
