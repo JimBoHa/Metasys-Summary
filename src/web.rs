@@ -2,16 +2,18 @@ use std::{convert::Infallible, net::SocketAddr, sync::Arc};
 
 use axum::{
     Json, Router,
-    extract::{ConnectInfo, DefaultBodyLimit, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use serde::Deserialize;
 use serde_json::json;
 use tower_http::trace::TraceLayer;
 
-use crate::app::AppState;
-use crate::email_reports::EmailReportSettingsUpdate;
+use crate::{
+    app::AppState, email_reports::EmailReportSettingsUpdate, sql_trends::SqlTrendSettingsUpdate,
+};
 
 const INDEX_HTML: &str = include_str!("../static/index.html");
 const APP_JS: &str = include_str!("../static/app.js");
@@ -31,6 +33,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/settings/reports/test", post(test_report_settings))
         .route("/api/reports/send", post(send_report_now))
+        .route(
+            "/api/settings/sql",
+            get(sql_settings).put(update_sql_settings),
+        )
+        .route("/api/settings/sql/test", post(test_sql_settings))
+        .route("/api/trends", get(trends))
         .fallback(not_found)
         .layer(DefaultBodyLimit::max(16 * 1024))
         .layer(TraceLayer::new_for_http())
@@ -116,14 +124,62 @@ async fn send_report_now(
         .map_err(ApiError::bad_gateway)
 }
 
+async fn sql_settings(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<crate::sql_trends::SqlTrendSettingsView>, ApiError> {
+    require_local(peer)?;
+    state.sql_trend_settings().map(Json).map_err(ApiError::from)
+}
+
+async fn update_sql_settings(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AppState>>,
+    Json(update): Json<SqlTrendSettingsUpdate>,
+) -> Result<Json<crate::sql_trends::SqlTrendSettingsView>, ApiError> {
+    require_local(peer)?;
+    state
+        .update_sql_trend_settings(update)
+        .map(Json)
+        .map_err(ApiError::bad_request)
+}
+
+async fn test_sql_settings(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_local(peer)?;
+    state
+        .test_sql_trend_connection()
+        .await
+        .map_err(ApiError::bad_gateway)?;
+    Ok(Json(json!({"status": "connected"})))
+}
+
+#[derive(Deserialize)]
+struct TrendQuery {
+    hours: Option<i64>,
+}
+
+async fn trends(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<TrendQuery>,
+) -> Result<Json<crate::sql_trends::TrendResponse>, ApiError> {
+    state
+        .sql_trends(query.hours.unwrap_or(24 * 7))
+        .await
+        .map(Json)
+        .map_err(ApiError::bad_gateway)
+}
+
 fn require_local(peer: SocketAddr) -> Result<(), ApiError> {
     if peer.ip().is_loopback() {
         Ok(())
     } else {
         Err(ApiError {
-            source: anyhow::anyhow!("report settings request rejected from {peer}"),
+            source: anyhow::anyhow!("settings request rejected from non-loopback address {peer}"),
             status: StatusCode::FORBIDDEN,
-            public_message: "Report settings and sending are available only from this Mac"
+            public_message: "Settings can only be changed from a browser running on this Mac"
                 .to_owned(),
         })
     }

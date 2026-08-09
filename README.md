@@ -60,6 +60,7 @@ Optional login-time background service:
 - Fourteen-day daily alarm chart with a seven-day rolling mean
 - Alarm-type and equipment-share donut charts
 - Configurable encrypted email reports with manual, daily, weekday, or weekly delivery
+- Optional Microsoft SQL Server trend chart with selectable 24-hour to 30-day ranges
 
 Modern Metasys REST versions v2-v6 are auto-detected. REST v5/v6 uses activities; v2-v4 uses alarm collections with version-appropriate filters. The legacy connector uses Alarm Manager for events and Potential Problem Areas for overrides. SQLite deduplicates event IDs across polls, so the local 30-day index improves continuously even when an older Metasys endpoint returns a limited initial history.
 
@@ -68,6 +69,19 @@ Modern Metasys REST versions v2-v6 are auto-detected. REST v5/v6 uses activities
 Open **Reports** from a browser running on the host Mac. Configure an SMTP relay, sender, recipient list, local schedule, and report sections. Available sections include active alarms, most common alarms, most serious alarms, operator overrides, problematic equipment, inferred equipment-offline conditions, and the 14-day alarm rate.
 
 Passwords stay in macOS Keychain. Only encrypted SMTP transports are supported: STARTTLS or implicit TLS. Settings, SMTP testing, and manual sending reject non-loopback clients. Scheduled reports run while the dashboard service is running and retry failures no more than once every 15 minutes. See [email report setup](docs/email-reports.md).
+
+## SQL trend source
+
+Open **SQL Trends** from a browser on the host Mac. Configure the SQL Server hostname or IP, port, database, read-only username, password, certificate policy, and mapping query. The password is stored only in macOS Keychain; non-secret settings are stored in the dashboard SQLite database. Settings endpoints reject non-loopback clients.
+
+The mapping query must be one read-only `SELECT` or `WITH` statement, use `@P1` and `@P2` for UTC start/end bounds, and return these aliases:
+
+- `point_name` as text
+- `sample_time` as `datetime`, `datetime2`, or `datetimeoffset`
+- `sample_value` as a numeric value
+- `unit` as text or `NULL`
+
+Metasys repository schemas vary. A stable read-only compatibility view is recommended. See [SQL trend setup](docs/sql-trends.md).
 
 ## Environment overrides
 
@@ -88,6 +102,7 @@ Passwords stay in macOS Keychain. Only encrypted SMTP transports are supported: 
 - Connector is read-only. It does not acknowledge/discard alarms, command points, or release overrides.
 - LAN dashboard has no separate login. Bind to `127.0.0.1` unless the building network segment is trusted and access-controlled.
 - Email configuration and sending are restricted to loopback clients; report recipients and delivery status are not exposed to LAN clients.
+- SQL settings and connection testing are restricted to loopback clients. Trend results remain visible wherever the dashboard is visible.
 - Certificate validation is enabled by default. Use `accept_invalid_certificates = true` only for an isolated deployment whose private certificate cannot yet be trusted.
 - Use an API-access Metasys account when the public REST API add-on is available. Johnson Controls documents that Standard and Tenant access types are rejected by the public REST API.
 - Alarm history stays on this Mac in `~/Library/Application Support/Metasys Dashboard/dashboard.sqlite3`.

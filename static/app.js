@@ -3,6 +3,7 @@
 const numberFormat = new Intl.NumberFormat();
 const palette = ["#2cc7d2", "#53d18b", "#f2b84b", "#f1894c", "#9a8cff", "#ef6f98", "#65a7e8", "#627984"];
 let dashboardData = null;
+let sqlTrendData = null;
 let refreshTimer = null;
 let reportRecipients = [];
 
@@ -22,6 +23,14 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   $("smtp-test-button").addEventListener("click", testSmtpConnection);
   $("send-report-button").addEventListener("click", sendReportNow);
+  $("sql-settings-button").addEventListener("click", openSqlSettings);
+  $("sql-settings-close").addEventListener("click", () => $("sql-settings-dialog").close());
+  $("sql-settings-form").addEventListener("submit", saveSqlSettings);
+  $("sql-test-button").addEventListener("click", testSqlConnection);
+  $("load-trends-button").addEventListener("click", loadSqlTrends);
+  $("trend-range").addEventListener("change", () => {
+    if (sqlTrendData) loadSqlTrends();
+  });
   loadDashboard();
   refreshTimer = window.setInterval(loadDashboard, 60_000);
   window.addEventListener("visibilitychange", () => {
@@ -412,6 +421,209 @@ function drawCharts() {
   drawLineChart($("alarm-rate-chart"), dashboardData.alarmRate);
   drawDonut($("type-chart"), $("type-legend"), dashboardData.alarmsByType, "alarms");
   drawDonut($("equipment-chart"), $("equipment-legend"), dashboardData.alarmsByEquipment, "alarms");
+  if (sqlTrendData) drawSqlTrendChart();
+}
+
+async function openSqlSettings() {
+  const dialog = $("sql-settings-dialog");
+  showFormMessage("Loading settings…");
+  if (!dialog.open) dialog.showModal();
+  try {
+    const response = await fetch("/api/settings/sql", { cache: "no-store" });
+    if (!response.ok) throw new Error(await apiError(response));
+    const settings = await response.json();
+    $("sql-enabled").checked = settings.enabled;
+    $("sql-host").value = settings.host;
+    $("sql-port").value = settings.port;
+    $("sql-database").value = settings.database;
+    $("sql-username").value = settings.username;
+    $("sql-trust-certificate").checked = settings.trustServerCertificate;
+    $("sql-query").value = settings.query;
+    $("sql-password").value = "";
+    $("sql-clear-password").checked = false;
+    setText("sql-password-state", settings.passwordConfigured ? "Password saved in macOS Keychain" : "No password saved");
+    showFormMessage("");
+  } catch (error) {
+    showFormMessage(error.message || "Unable to load SQL settings", true);
+  }
+}
+
+async function saveSqlSettings(event) {
+  event.preventDefault();
+  const button = $("sql-save-button");
+  button.disabled = true;
+  showFormMessage("Saving…");
+  const password = $("sql-password").value;
+  const payload = {
+    enabled: $("sql-enabled").checked,
+    host: $("sql-host").value,
+    port: Number($("sql-port").value),
+    database: $("sql-database").value,
+    username: $("sql-username").value,
+    password: password || null,
+    clearPassword: $("sql-clear-password").checked,
+    trustServerCertificate: $("sql-trust-certificate").checked,
+    query: $("sql-query").value
+  };
+  try {
+    const response = await fetch("/api/settings/sql", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    if (!response.ok) throw new Error(await apiError(response));
+    const settings = await response.json();
+    $("sql-password").value = "";
+    $("sql-clear-password").checked = false;
+    setText("sql-password-state", settings.passwordConfigured ? "Password saved in macOS Keychain" : "No password saved");
+    showFormMessage("Settings saved. Test connection before loading trends.");
+    setTrendMessage(settings.enabled ? "SQL trend source configured. Load trends when ready." : "SQL trend source is disabled.");
+  } catch (error) {
+    showFormMessage(error.message || "Unable to save SQL settings", true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function testSqlConnection() {
+  const button = $("sql-test-button");
+  button.disabled = true;
+  showFormMessage("Testing saved SQL Server connection…");
+  try {
+    const response = await fetch("/api/settings/sql/test", { method: "POST" });
+    if (!response.ok) throw new Error(await apiError(response));
+    showFormMessage("Connection successful.");
+  } catch (error) {
+    showFormMessage(error.message || "SQL Server connection failed", true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function loadSqlTrends() {
+  const button = $("load-trends-button");
+  button.disabled = true;
+  setTrendMessage("Loading SQL trend samples…");
+  try {
+    const hours = Number($("trend-range").value);
+    const response = await fetch(`/api/trends?hours=${encodeURIComponent(hours)}`, { cache: "no-store" });
+    if (!response.ok) throw new Error(await apiError(response));
+    sqlTrendData = await response.json();
+    drawSqlTrendChart();
+    const suffix = sqlTrendData.truncated ? " · limited to 5,000 samples" : "";
+    setTrendMessage(`${numberFormat.format(sqlTrendData.sampleCount)} samples across ${numberFormat.format(sqlTrendData.series.length)} series${suffix}`);
+  } catch (error) {
+    sqlTrendData = null;
+    clearSqlTrendChart();
+    setTrendMessage(error.message || "Unable to load SQL trends", true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function drawSqlTrendChart() {
+  if (!sqlTrendData) return;
+  const canvas = $("sql-trend-chart");
+  const legend = $("sql-trend-legend");
+  const { ctx, width, height } = canvasContext(canvas);
+  const visibleSeries = sqlTrendData.series.filter((series) => series.samples.length).slice(0, 8);
+  const samples = visibleSeries.flatMap((series) => series.samples);
+  ctx.clearRect(0, 0, width, height);
+  legend.replaceChildren();
+  if (!samples.length) {
+    ctx.fillStyle = "#5e7783";
+    ctx.font = "12px -apple-system, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("No samples returned for selected range", width / 2, height / 2);
+    return;
+  }
+
+  const margin = { top: 14, right: 17, bottom: 31, left: 57 };
+  const plotWidth = Math.max(1, width - margin.left - margin.right);
+  const plotHeight = Math.max(1, height - margin.top - margin.bottom);
+  const timestamps = samples.map((sample) => new Date(sample.timestamp).getTime());
+  const values = samples.map((sample) => sample.value);
+  const start = Math.min(...timestamps);
+  const end = Math.max(...timestamps);
+  let minimum = Math.min(...values);
+  let maximum = Math.max(...values);
+  if (minimum === maximum) { minimum -= 1; maximum += 1; }
+  const padding = (maximum - minimum) * .08;
+  minimum -= padding;
+  maximum += padding;
+  const x = (timestamp) => margin.left + ((new Date(timestamp).getTime() - start) / Math.max(1, end - start)) * plotWidth;
+  const y = (value) => margin.top + plotHeight - ((value - minimum) / (maximum - minimum)) * plotHeight;
+
+  ctx.font = "10px -apple-system, sans-serif";
+  ctx.textBaseline = "middle";
+  for (let index = 0; index <= 4; index += 1) {
+    const value = minimum + (maximum - minimum) * index / 4;
+    const lineY = y(value);
+    ctx.beginPath();
+    ctx.strokeStyle = "rgba(129, 165, 180, .11)";
+    ctx.moveTo(margin.left, lineY);
+    ctx.lineTo(width - margin.right, lineY);
+    ctx.stroke();
+    ctx.fillStyle = "#58717c";
+    ctx.textAlign = "right";
+    ctx.fillText(formatTrendValue(value), margin.left - 8, lineY);
+  }
+
+  ctx.fillStyle = "#58717c";
+  ctx.textBaseline = "alphabetic";
+  ctx.textAlign = "left";
+  ctx.fillText(new Date(start).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric" }), margin.left, height - 8);
+  ctx.textAlign = "right";
+  ctx.fillText(new Date(end).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric" }), width - margin.right, height - 8);
+
+  visibleSeries.forEach((series, index) => {
+    const color = palette[index % palette.length];
+    ctx.beginPath();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.7;
+    ctx.lineJoin = "round";
+    series.samples.forEach((sample, sampleIndex) => {
+      const method = sampleIndex ? "lineTo" : "moveTo";
+      ctx[method](x(sample.timestamp), y(sample.value));
+    });
+    ctx.stroke();
+    const item = document.createElement("span");
+    const swatch = document.createElement("i");
+    swatch.style.background = color;
+    item.append(swatch, document.createTextNode(`${series.name}${series.unit ? ` (${series.unit})` : ""}`));
+    legend.append(item);
+  });
+  if (sqlTrendData.series.length > visibleSeries.length) {
+    const more = document.createElement("span");
+    more.textContent = `+${sqlTrendData.series.length - visibleSeries.length} more series`;
+    legend.append(more);
+  }
+  canvas.setAttribute("aria-label", `${sqlTrendData.sampleCount} SQL trend samples across ${sqlTrendData.series.length} series`);
+}
+
+function clearSqlTrendChart() {
+  const canvas = $("sql-trend-chart");
+  const { ctx, width, height } = canvasContext(canvas);
+  ctx.clearRect(0, 0, width, height);
+  $("sql-trend-legend").replaceChildren();
+}
+
+function setTrendMessage(message, isError = false) {
+  const element = $("trend-message");
+  element.textContent = message;
+  element.classList.toggle("error", isError);
+}
+
+function showFormMessage(message, isError = false) {
+  const element = $("sql-settings-message");
+  element.textContent = message;
+  element.classList.toggle("error", isError);
+}
+
+function formatTrendValue(value) {
+  const absolute = Math.abs(value);
+  if (absolute >= 1000 || (absolute > 0 && absolute < .01)) return value.toExponential(1);
+  return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
 
 function drawLineChart(canvas, points) {
