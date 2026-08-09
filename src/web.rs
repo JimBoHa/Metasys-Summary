@@ -1,8 +1,8 @@
-use std::{convert::Infallible, sync::Arc};
+use std::{convert::Infallible, net::SocketAddr, sync::Arc};
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{ConnectInfo, DefaultBodyLimit, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -11,6 +11,7 @@ use serde_json::json;
 use tower_http::trace::TraceLayer;
 
 use crate::app::AppState;
+use crate::email_reports::EmailReportSettingsUpdate;
 
 const INDEX_HTML: &str = include_str!("../static/index.html");
 const APP_JS: &str = include_str!("../static/app.js");
@@ -24,7 +25,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/dashboard", get(dashboard))
         .route("/api/health", get(health))
         .route("/api/refresh", post(refresh))
+        .route(
+            "/api/settings/reports",
+            get(report_settings).put(update_report_settings),
+        )
+        .route("/api/settings/reports/test", post(test_report_settings))
+        .route("/api/reports/send", post(send_report_now))
         .fallback(not_found)
+        .layer(DefaultBodyLimit::max(16 * 1024))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -61,6 +69,66 @@ async fn refresh(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     )
 }
 
+async fn report_settings(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<crate::email_reports::EmailReportSettingsView>, ApiError> {
+    require_local(peer)?;
+    state
+        .email_report_settings()
+        .map(Json)
+        .map_err(ApiError::from)
+}
+
+async fn update_report_settings(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AppState>>,
+    Json(update): Json<EmailReportSettingsUpdate>,
+) -> Result<Json<crate::email_reports::EmailReportSettingsView>, ApiError> {
+    require_local(peer)?;
+    state
+        .update_email_report_settings(update)
+        .map(Json)
+        .map_err(ApiError::bad_request)
+}
+
+async fn test_report_settings(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_local(peer)?;
+    state
+        .test_email_report_connection()
+        .await
+        .map_err(ApiError::bad_gateway)?;
+    Ok(Json(json!({"status": "connected"})))
+}
+
+async fn send_report_now(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<crate::email_reports::EmailDeliveryResult>, ApiError> {
+    require_local(peer)?;
+    state
+        .send_email_report_now()
+        .await
+        .map(Json)
+        .map_err(ApiError::bad_gateway)
+}
+
+fn require_local(peer: SocketAddr) -> Result<(), ApiError> {
+    if peer.ip().is_loopback() {
+        Ok(())
+    } else {
+        Err(ApiError {
+            source: anyhow::anyhow!("report settings request rejected from {peer}"),
+            status: StatusCode::FORBIDDEN,
+            public_message: "Report settings and sending are available only from this Mac"
+                .to_owned(),
+        })
+    }
+}
+
 async fn not_found() -> impl IntoResponse {
     (
         StatusCode::NOT_FOUND,
@@ -82,22 +150,46 @@ fn static_response(content: &'static str, content_type: &'static str) -> Respons
     (headers, content).into_response()
 }
 
-struct ApiError(anyhow::Error);
+struct ApiError {
+    source: anyhow::Error,
+    status: StatusCode,
+    public_message: String,
+}
+
+impl ApiError {
+    fn bad_request(source: anyhow::Error) -> Self {
+        let public_message = source.to_string();
+        Self {
+            source,
+            status: StatusCode::BAD_REQUEST,
+            public_message,
+        }
+    }
+
+    fn bad_gateway(source: anyhow::Error) -> Self {
+        let public_message = source.to_string();
+        Self {
+            source,
+            status: StatusCode::BAD_GATEWAY,
+            public_message,
+        }
+    }
+}
 
 impl From<anyhow::Error> for ApiError {
     fn from(value: anyhow::Error) -> Self {
-        Self(value)
+        Self {
+            source: value,
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            public_message: "dashboard data is temporarily unavailable".to_owned(),
+        }
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        tracing::error!(error = %self.0, "dashboard API failed");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "dashboard data is temporarily unavailable"})),
-        )
-            .into_response()
+        tracing::error!(error = %self.source, status = %self.status, "dashboard API failed");
+        (self.status, Json(json!({"error": self.public_message}))).into_response()
     }
 }
 

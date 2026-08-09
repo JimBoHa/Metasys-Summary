@@ -25,6 +25,10 @@
         <span id="health-badge" class="status-badge starting"><i></i> Connecting</span>
         <span id="last-updated" class="last-updated">Waiting for first poll</span>
       </div>
+      <button id="report-settings-button" class="settings-button" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4z M4 6l8 7 8-7"/></svg>
+        <span>Reports</span>
+      </button>
       <button id="refresh-button" class="refresh-button" type="button">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6v5h-5M4 18v-5h5M18.7 9A7 7 0 0 0 6.1 6.1L4 8m16 8-2.1 1.9A7 7 0 0 1 5.3 15"/></svg>
         <span>Refresh</span>
@@ -155,6 +159,62 @@
       </article>
     </section>
   </main>
+
+  <dialog id="report-settings-dialog" class="settings-dialog">
+    <form id="report-settings-form" method="dialog">
+      <header class="dialog-header">
+        <div><p class="panel-kicker">LOCAL CONFIGURATION</p><h2>Email reports</h2></div>
+        <button id="report-settings-close" class="icon-button" type="button" aria-label="Close report settings">×</button>
+      </header>
+      <p class="dialog-intro">Send encrypted SMTP reports manually or on a local schedule. SMTP password stays in macOS Keychain. Configuration and sending are restricted to this Mac.</p>
+      <div id="report-settings-message" class="form-message" role="status" aria-live="polite"></div>
+      <div class="form-grid">
+        <label class="checkbox-field full-field"><input id="report-enabled" type="checkbox"> Enable scheduled reports</label>
+        <label>SMTP hostname<input id="smtp-host" required maxlength="253" placeholder="smtp.example.invalid"></label>
+        <label>Port<input id="smtp-port" type="number" min="1" max="65535" value="587" required></label>
+        <label>SMTP username<input id="smtp-username" required maxlength="256" autocomplete="username" placeholder="report_sender"></label>
+        <label>Transport security<select id="smtp-tls-mode"><option value="startTls">STARTTLS</option><option value="implicitTls">Implicit TLS</option></select></label>
+        <label>Sender name<input id="report-from-name" required maxlength="128" value="Metasys Summary"></label>
+        <label>Sender email<input id="report-from-address" type="email" required autocomplete="email" placeholder="reports@example.invalid"></label>
+        <label class="full-field">SMTP password<input id="smtp-password" type="password" autocomplete="new-password" placeholder="Leave blank to keep Keychain password"><small id="smtp-password-state">No password saved</small></label>
+        <label class="checkbox-field full-field"><input id="smtp-clear-password" type="checkbox"> Remove saved SMTP password</label>
+
+        <fieldset class="full-field settings-group">
+          <legend>Recipients</legend>
+          <div class="recipient-entry"><input id="new-report-recipient" type="email" placeholder="operations@example.invalid"><button id="add-report-recipient" class="secondary-button" type="button">Add address</button></div>
+          <div id="report-recipient-list" class="recipient-list"><p class="empty-recipient">No recipients configured</p></div>
+        </fieldset>
+
+        <fieldset class="full-field settings-group">
+          <legend>Schedule</legend>
+          <div class="schedule-grid">
+            <label>Cadence<select id="report-cadence"><option value="daily">Daily</option><option value="weekdays">Weekdays</option><option value="weekly">Weekly</option></select></label>
+            <label>Local send time<input id="report-send-time" type="time" value="08:00" required></label>
+            <label>Weekly day<select id="report-weekly-day"><option value="1">Monday</option><option value="2">Tuesday</option><option value="3">Wednesday</option><option value="4">Thursday</option><option value="5">Friday</option><option value="6">Saturday</option><option value="7">Sunday</option></select></label>
+          </div>
+        </fieldset>
+
+        <fieldset class="full-field settings-group">
+          <legend>Report sections</legend>
+          <div class="section-checks">
+            <label class="checkbox-field"><input id="section-active-alarms" type="checkbox" checked> Active alarms</label>
+            <label class="checkbox-field"><input id="section-common-alarms" type="checkbox" checked> Most common alarms</label>
+            <label class="checkbox-field"><input id="section-serious-alarms" type="checkbox" checked> Most serious alarms</label>
+            <label class="checkbox-field"><input id="section-overrides" type="checkbox" checked> Operator overrides</label>
+            <label class="checkbox-field"><input id="section-problematic-equipment" type="checkbox" checked> Problematic equipment</label>
+            <label class="checkbox-field"><input id="section-equipment-offline" type="checkbox" checked> Equipment offline</label>
+            <label class="checkbox-field"><input id="section-alarm-rate" type="checkbox" checked> 14-day alarm rate</label>
+          </div>
+        </fieldset>
+      </div>
+      <div id="report-delivery-status" class="delivery-status">No report delivery attempted</div>
+      <footer class="dialog-actions">
+        <button id="smtp-test-button" class="secondary-button" type="button">Test saved SMTP</button>
+        <button id="send-report-button" class="secondary-button" type="button">Send saved report</button>
+        <button id="report-save-button" class="primary-button" type="submit">Save settings</button>
+      </footer>
+    </form>
+  </dialog>
 
   <footer>
     <span>Read-only monitoring dashboard</span>

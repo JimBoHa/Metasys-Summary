@@ -7,6 +7,10 @@ use tokio::sync::{Mutex, RwLock};
 use crate::{
     analytics,
     config::Config,
+    email_reports::{
+        EmailDeliveryResult, EmailReportSettings, EmailReportSettingsUpdate,
+        EmailReportSettingsView, clear_smtp_password, send_report, set_smtp_password, test_smtp,
+    },
     metasys::MetasysClient,
     models::{AlarmRecord, DashboardView, HealthView, OverrideRecord},
     store::Store,
@@ -25,6 +29,7 @@ pub struct AppState {
     client: MetasysClient,
     live: RwLock<LiveData>,
     poll_lock: Mutex<()>,
+    report_send_lock: Mutex<()>,
 }
 
 impl AppState {
@@ -36,6 +41,7 @@ impl AppState {
             client,
             live: RwLock::new(LiveData::default()),
             poll_lock: Mutex::new(()),
+            report_send_lock: Mutex::new(()),
         })
     }
 
@@ -124,5 +130,88 @@ impl AppState {
 
     pub async fn health(&self) -> HealthView {
         self.live.read().await.health.clone()
+    }
+
+    pub fn email_report_settings(&self) -> Result<EmailReportSettingsView> {
+        let settings = self.store.email_report_settings()?;
+        let status = self.store.report_delivery_status()?;
+        Ok(settings.view(
+            status.last_attempt_at,
+            status.last_success_at,
+            status.last_error,
+        ))
+    }
+
+    pub fn update_email_report_settings(
+        &self,
+        update: EmailReportSettingsUpdate,
+    ) -> Result<EmailReportSettingsView> {
+        let settings = update.validated_settings()?;
+        if update.clear_password {
+            clear_smtp_password()?;
+        } else if let Some(password) = update.smtp_password.as_deref()
+            && !password.is_empty()
+        {
+            set_smtp_password(password)?;
+        }
+        self.store.save_email_report_settings(&settings)?;
+        self.email_report_settings()
+    }
+
+    pub async fn test_email_report_connection(&self) -> Result<()> {
+        let settings = self.store.email_report_settings()?;
+        test_smtp(&settings).await
+    }
+
+    pub async fn send_email_report_now(&self) -> Result<EmailDeliveryResult> {
+        let _guard = self.report_send_lock.lock().await;
+        let settings = self.store.email_report_settings()?;
+        self.deliver_email_report(&settings).await
+    }
+
+    pub async fn send_scheduled_email_report(&self) {
+        let Ok(settings) = self.store.email_report_settings() else {
+            return;
+        };
+        let Ok(status) = self.store.report_delivery_status() else {
+            return;
+        };
+        if !settings.is_due(
+            chrono::Local::now(),
+            status.last_attempt_at,
+            status.last_success_at,
+        ) {
+            return;
+        }
+        let Ok(_guard) = self.report_send_lock.try_lock() else {
+            return;
+        };
+        if let Err(error) = self.deliver_email_report(&settings).await {
+            tracing::warn!(error = %error, "scheduled report email failed");
+        }
+    }
+
+    async fn deliver_email_report(
+        &self,
+        settings: &EmailReportSettings,
+    ) -> Result<EmailDeliveryResult> {
+        let dashboard = self.dashboard().await?;
+        match send_report(settings, &dashboard).await {
+            Ok(result) => {
+                self.store
+                    .record_report_delivery(true, result.recipient_count, None)?;
+                Ok(result)
+            }
+            Err(error) => {
+                if let Err(store_error) = self.store.record_report_delivery(
+                    false,
+                    settings.recipients.len(),
+                    Some(&error.to_string()),
+                ) {
+                    tracing::warn!(error = %store_error, "failed to record report delivery error");
+                }
+                Err(error)
+            }
+        }
     }
 }

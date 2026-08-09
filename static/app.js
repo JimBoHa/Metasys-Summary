@@ -4,11 +4,24 @@ const numberFormat = new Intl.NumberFormat();
 const palette = ["#2cc7d2", "#53d18b", "#f2b84b", "#f1894c", "#9a8cff", "#ef6f98", "#65a7e8", "#627984"];
 let dashboardData = null;
 let refreshTimer = null;
+let reportRecipients = [];
 
 const $ = (id) => document.getElementById(id);
 
 document.addEventListener("DOMContentLoaded", () => {
   $("refresh-button").addEventListener("click", manualRefresh);
+  $("report-settings-button").addEventListener("click", openReportSettings);
+  $("report-settings-close").addEventListener("click", () => $("report-settings-dialog").close());
+  $("report-settings-form").addEventListener("submit", saveReportSettings);
+  $("add-report-recipient").addEventListener("click", addReportRecipient);
+  $("new-report-recipient").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      addReportRecipient();
+    }
+  });
+  $("smtp-test-button").addEventListener("click", testSmtpConnection);
+  $("send-report-button").addEventListener("click", sendReportNow);
   loadDashboard();
   refreshTimer = window.setInterval(loadDashboard, 60_000);
   window.addEventListener("visibilitychange", () => {
@@ -45,6 +58,200 @@ async function manualRefresh() {
   } finally {
     button.disabled = false;
     button.classList.remove("loading");
+  }
+}
+
+async function openReportSettings() {
+  const dialog = $("report-settings-dialog");
+  showReportMessage("Loading settings…");
+  if (!dialog.open) dialog.showModal();
+  try {
+    const response = await fetch("/api/settings/reports", { cache: "no-store" });
+    if (!response.ok) throw new Error(await apiError(response));
+    const settings = await response.json();
+    $("report-enabled").checked = settings.enabled;
+    $("smtp-host").value = settings.smtpHost;
+    $("smtp-port").value = settings.smtpPort;
+    $("smtp-username").value = settings.smtpUsername;
+    $("smtp-tls-mode").value = settings.tlsMode;
+    $("report-from-name").value = settings.fromName;
+    $("report-from-address").value = settings.fromAddress;
+    $("smtp-password").value = "";
+    $("smtp-clear-password").checked = false;
+    $("report-cadence").value = settings.cadence;
+    $("report-send-time").value = settings.sendTime;
+    $("report-weekly-day").value = String(settings.weeklyDay);
+    $("section-active-alarms").checked = settings.sections.activeAlarms;
+    $("section-common-alarms").checked = settings.sections.commonAlarms;
+    $("section-serious-alarms").checked = settings.sections.seriousAlarms;
+    $("section-overrides").checked = settings.sections.operatorOverrides;
+    $("section-problematic-equipment").checked = settings.sections.problematicEquipment;
+    $("section-equipment-offline").checked = settings.sections.equipmentOffline;
+    $("section-alarm-rate").checked = settings.sections.alarmRate;
+    reportRecipients = [...settings.recipients];
+    renderReportRecipients();
+    setText("smtp-password-state", settings.passwordConfigured ? "Password saved in macOS Keychain" : "No password saved");
+    renderDeliveryStatus(settings);
+    showReportMessage("");
+  } catch (error) {
+    showReportMessage(error.message || "Unable to load report settings", true);
+  }
+}
+
+function addReportRecipient() {
+  const input = $("new-report-recipient");
+  const value = input.value.trim().toLowerCase();
+  if (!value || !input.checkValidity()) {
+    input.reportValidity();
+    return;
+  }
+  if (!reportRecipients.includes(value)) reportRecipients.push(value);
+  input.value = "";
+  renderReportRecipients();
+}
+
+function renderReportRecipients() {
+  const list = $("report-recipient-list");
+  list.replaceChildren();
+  if (!reportRecipients.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-recipient";
+    empty.textContent = "No recipients configured";
+    list.append(empty);
+    return;
+  }
+  reportRecipients.forEach((address) => {
+    const chip = document.createElement("span");
+    chip.className = "recipient-chip";
+    const label = document.createElement("span");
+    label.textContent = address;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.setAttribute("aria-label", `Remove ${address}`);
+    remove.textContent = "×";
+    remove.addEventListener("click", () => {
+      reportRecipients = reportRecipients.filter((recipient) => recipient !== address);
+      renderReportRecipients();
+    });
+    chip.append(label, remove);
+    list.append(chip);
+  });
+}
+
+function reportSettingsPayload() {
+  const password = $("smtp-password").value;
+  return {
+    enabled: $("report-enabled").checked,
+    smtpHost: $("smtp-host").value,
+    smtpPort: Number($("smtp-port").value),
+    smtpUsername: $("smtp-username").value,
+    smtpPassword: password || null,
+    clearPassword: $("smtp-clear-password").checked,
+    fromName: $("report-from-name").value,
+    fromAddress: $("report-from-address").value,
+    tlsMode: $("smtp-tls-mode").value,
+    recipients: reportRecipients,
+    cadence: $("report-cadence").value,
+    sendTime: $("report-send-time").value,
+    weeklyDay: Number($("report-weekly-day").value),
+    sections: {
+      activeAlarms: $("section-active-alarms").checked,
+      commonAlarms: $("section-common-alarms").checked,
+      seriousAlarms: $("section-serious-alarms").checked,
+      operatorOverrides: $("section-overrides").checked,
+      problematicEquipment: $("section-problematic-equipment").checked,
+      equipmentOffline: $("section-equipment-offline").checked,
+      alarmRate: $("section-alarm-rate").checked
+    }
+  };
+}
+
+async function saveReportSettings(event) {
+  event.preventDefault();
+  const form = $("report-settings-form");
+  if (!form.reportValidity()) return;
+  const button = $("report-save-button");
+  button.disabled = true;
+  showReportMessage("Saving…");
+  try {
+    const response = await fetch("/api/settings/reports", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(reportSettingsPayload())
+    });
+    if (!response.ok) throw new Error(await apiError(response));
+    const settings = await response.json();
+    $("smtp-password").value = "";
+    $("smtp-clear-password").checked = false;
+    setText("smtp-password-state", settings.passwordConfigured ? "Password saved in macOS Keychain" : "No password saved");
+    renderDeliveryStatus(settings);
+    showReportMessage("Report settings saved.");
+  } catch (error) {
+    showReportMessage(error.message || "Unable to save report settings", true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function testSmtpConnection() {
+  const button = $("smtp-test-button");
+  button.disabled = true;
+  showReportMessage("Testing saved SMTP connection…");
+  try {
+    const response = await fetch("/api/settings/reports/test", { method: "POST" });
+    if (!response.ok) throw new Error(await apiError(response));
+    showReportMessage("SMTP connection successful.");
+  } catch (error) {
+    showReportMessage(error.message || "SMTP connection failed", true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function sendReportNow() {
+  const button = $("send-report-button");
+  button.disabled = true;
+  showReportMessage("Building and sending report…");
+  try {
+    const response = await fetch("/api/reports/send", { method: "POST" });
+    if (!response.ok) throw new Error(await apiError(response));
+    const result = await response.json();
+    showReportMessage(`Report sent to ${numberFormat.format(result.recipientCount)} recipient${result.recipientCount === 1 ? "" : "s"}.`);
+    setText("report-delivery-status", `Last sent ${formatTime(result.sentAt)}`);
+    $("report-delivery-status").classList.remove("error");
+  } catch (error) {
+    showReportMessage(error.message || "Unable to send report", true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function renderDeliveryStatus(settings) {
+  const element = $("report-delivery-status");
+  if (settings.lastError) {
+    element.textContent = `Last attempt ${formatTime(settings.lastAttemptAt)} failed: ${settings.lastError}`;
+    element.classList.add("error");
+  } else if (settings.lastSuccessAt) {
+    element.textContent = `Last successful delivery ${formatTime(settings.lastSuccessAt)}`;
+    element.classList.remove("error");
+  } else {
+    element.textContent = "No report delivery attempted";
+    element.classList.remove("error");
+  }
+}
+
+function showReportMessage(message, isError = false) {
+  const element = $("report-settings-message");
+  element.textContent = message;
+  element.classList.toggle("error", isError);
+}
+
+async function apiError(response) {
+  try {
+    const body = await response.json();
+    return body.error || `Request failed (${response.status})`;
+  } catch (_) {
+    return `Request failed (${response.status})`;
   }
 }
 
