@@ -6,6 +6,7 @@ use metasys_dashboard::{
     app::AppState,
     config::{Config, store_password},
     metasys::MetasysClient,
+    portal::{auth::hash_password, models::PortalRole},
     store::Store,
     web,
 };
@@ -42,6 +43,20 @@ enum Command {
     },
     /// Verify one Metasys poll without starting web server.
     Check,
+    /// Create an administrator for the maintenance request portal.
+    PortalAdmin {
+        #[arg(long)]
+        email: String,
+        #[arg(long)]
+        name: String,
+    },
+    /// Read one live Metasys point while configuring a portal region.
+    CheckTemperature {
+        #[arg(long)]
+        reference: String,
+        #[arg(long, default_value = "85")]
+        attribute: String,
+    },
 }
 
 #[tokio::main]
@@ -65,8 +80,45 @@ async fn main() -> Result<()> {
             keychain_service.unwrap_or(config.keychain_service),
         ),
         Some(Command::Check) => check(config).await,
+        Some(Command::PortalAdmin { email, name }) => create_portal_admin(config, email, name),
+        Some(Command::CheckTemperature {
+            reference,
+            attribute,
+        }) => check_temperature(config, reference, attribute).await,
         None => serve(config, cli.open_browser || launched_from_app_bundle()).await,
     }
+}
+
+async fn check_temperature(config: Config, reference: String, attribute: String) -> Result<()> {
+    let client = MetasysClient::new(Arc::new(config))?;
+    let reading = client.read_temperature(&reference, &attribute).await?;
+    println!(
+        "Temperature OK: {} {} | {}",
+        reading.display_value, reading.unit, reading.status
+    );
+    Ok(())
+}
+
+fn create_portal_admin(config: Config, email: String, display_name: String) -> Result<()> {
+    metasys_dashboard::portal::auth::validate_user(&email, &display_name)?;
+    let password = rpassword::prompt_password(format!("Portal password for {email}: "))?;
+    let confirmation = rpassword::prompt_password("Confirm portal password: ")?;
+    if password != confirmation {
+        bail!("passwords do not match");
+    }
+    let password_hash = hash_password(&password)?;
+    config.ensure_data_directory()?;
+    let store = Store::open(&config.database_path)?;
+    let user = store.create_portal_user(
+        &email,
+        &display_name,
+        PortalRole::Admin,
+        &password_hash,
+        &[],
+        &[],
+    )?;
+    println!("Portal administrator created for {}.", user.email);
+    Ok(())
 }
 
 fn configure(username: String, service: String) -> Result<()> {

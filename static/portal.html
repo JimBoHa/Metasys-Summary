@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'">
+  <title>Building Maintenance Portal</title>
+  <link rel="stylesheet" href="/portal.css">
+  <script src="/portal.js" defer></script>
+</head>
+<body>
+  <section id="login-view" class="login-shell">
+    <div class="login-art" aria-hidden="true">
+      <div class="blueprint-grid"></div>
+      <div class="building-silhouette">
+        <span></span><span></span><span></span><span></span><span></span><span></span>
+      </div>
+      <p>SPACE / COMFORT / RESPONSE</p>
+    </div>
+    <div class="login-panel">
+      <div class="brand-lockup">
+        <span class="brand-symbol"><i></i><i></i><i></i></span>
+        <span><small>METASYS SUMMARY</small><strong>Maintenance Portal</strong></span>
+      </div>
+      <div id="setup-notice" class="setup-notice" hidden>
+        <span>INITIAL SETUP</span>
+        <h1>Create the first administrator</h1>
+        <p>Run this command in Terminal on the host Mac, then reload this page:</p>
+        <code>metasys-dashboard portal-admin --email you@example.com --name "Your Name"</code>
+      </div>
+      <form id="login-form" class="login-form">
+        <p class="eyebrow">SECURE ACCESS</p>
+        <h1>Welcome back</h1>
+        <p>Sign in to view your assigned building spaces and service requests.</p>
+        <label>Email address<input id="login-email" type="email" autocomplete="username" required maxlength="254"></label>
+        <label>Password<input id="login-password" type="password" autocomplete="current-password" required maxlength="256"></label>
+        <div id="login-message" class="form-message" role="status" aria-live="polite"></div>
+        <button id="login-button" class="primary-button" type="submit">Sign in</button>
+      </form>
+    </div>
+  </section>
+
+  <div id="app-shell" class="app-shell" hidden>
+    <header class="app-header">
+      <a class="app-brand" href="#home" aria-label="Maintenance portal home">
+        <span class="brand-symbol"><i></i><i></i><i></i></span>
+        <span><small>METASYS SUMMARY</small><strong>Maintenance Portal</strong></span>
+      </a>
+      <nav aria-label="Primary navigation">
+        <button class="nav-button active" data-view="home" type="button">Building</button>
+        <button class="nav-button" data-view="requests" type="button">Service requests</button>
+        <button id="admin-nav" class="nav-button" data-view="admin" type="button" hidden>Administration</button>
+        <a id="operations-link" class="nav-link" href="/operations" hidden>Operations</a>
+      </nav>
+      <div class="user-menu">
+        <span><strong id="current-user-name">—</strong><small id="current-user-role">—</small></span>
+        <button id="logout-button" class="icon-button" type="button" aria-label="Sign out">↗</button>
+      </div>
+    </header>
+
+    <main class="app-main">
+      <div id="global-message" class="global-message" role="status" aria-live="polite" hidden></div>
+
+      <section id="home-section" class="view-section">
+        <header class="page-heading">
+          <div><p class="eyebrow">BUILDING COMFORT</p><h1 id="home-title">Your spaces</h1><p>Choose a floor, then select an area for current conditions and reporting.</p></div>
+          <button id="refresh-map-button" class="secondary-button" type="button">Refresh values</button>
+        </header>
+        <div id="building-tabs" class="building-tabs" role="tablist"></div>
+        <section class="overview-card">
+          <header><div><p class="eyebrow">BUILDING OVERVIEW</p><h2 id="overview-title">No building configured</h2></div><span id="overview-floor-count" class="count-pill">0 floors</span></header>
+          <div id="building-overview-map" class="map-stage overview-stage"></div>
+          <div id="floor-cards" class="floor-cards"></div>
+        </section>
+        <section id="floor-section" class="floor-workspace" hidden>
+          <header class="workspace-header">
+            <div><p class="eyebrow">LIVE FLOOR VIEW</p><h2 id="floor-title">Floor</h2></div>
+            <div id="floor-tabs" class="floor-tabs"></div>
+          </header>
+          <div class="floor-layout">
+            <div id="floor-map" class="map-stage floor-map"></div>
+            <aside id="region-panel" class="region-panel">
+              <p class="eyebrow">SELECT AN AREA</p>
+              <h3>Live room conditions</h3>
+              <p>Click a highlighted region on the map to inspect its mapped FAV temperature.</p>
+            </aside>
+          </div>
+        </section>
+      </section>
+
+      <section id="requests-section" class="view-section" hidden>
+        <header class="page-heading">
+          <div><p class="eyebrow">SERVICE DESK</p><h1>Maintenance requests</h1><p>Requests are filtered to the spaces assigned to your account.</p></div>
+          <button id="refresh-requests-button" class="secondary-button" type="button">Refresh</button>
+        </header>
+        <div class="requests-layout">
+          <div id="request-list" class="request-list"></div>
+          <aside id="request-detail" class="request-detail"><p class="empty-state">Select a request to view details.</p></aside>
+        </div>
+      </section>
+
+      <section id="admin-section" class="view-section" hidden>
+        <header class="page-heading">
+          <div><p class="eyebrow">ADMINISTRATION</p><h1>Spaces, maps, and access</h1><p>Build the site hierarchy, simplify drawings, map FAV points, and assign account scopes.</p></div>
+        </header>
+        <div class="admin-tabs" role="tablist">
+          <button class="admin-tab active" data-admin-view="structure" type="button">Buildings & floors</button>
+          <button class="admin-tab" data-admin-view="maps" type="button">Floor-plan editor</button>
+          <button class="admin-tab" data-admin-view="users" type="button">Users & access</button>
+        </div>
+
+        <section id="admin-structure" class="admin-pane">
+          <div class="admin-grid">
+            <form id="building-form" class="admin-card">
+              <p class="eyebrow">SITE STRUCTURE</p><h2>Building</h2>
+              <input id="building-id" type="hidden">
+              <label>Name<input id="building-name" required maxlength="160" placeholder="Building A"></label>
+              <label>Display order<input id="building-order" type="number" value="0"></label>
+              <div class="form-actions"><button class="primary-button" type="submit">Save building</button><button id="building-clear" class="text-button" type="button">Clear</button></div>
+            </form>
+            <form id="floor-form" class="admin-card">
+              <p class="eyebrow">SITE STRUCTURE</p><h2>Floor</h2>
+              <input id="floor-id" type="hidden">
+              <label>Building<select id="floor-building" required></select></label>
+              <label>Name<input id="floor-name-input" required maxlength="160" placeholder="First floor"></label>
+              <label>Display order<input id="floor-order" type="number" value="0"></label>
+              <div class="form-actions"><button class="primary-button" type="submit">Save floor</button><button id="floor-clear" class="text-button" type="button">Clear</button></div>
+            </form>
+          </div>
+          <div id="structure-list" class="structure-list"></div>
+        </section>
+
+        <section id="admin-maps" class="admin-pane" hidden>
+          <div class="upload-editor-layout">
+            <aside class="editor-sidebar">
+              <form id="floorplan-upload-form" class="admin-card compact-card">
+                <p class="eyebrow">SOURCE DRAWING</p><h2>Upload PDF</h2>
+                <p class="help-text">The first page is rendered locally on this Mac. Linework is auto-traced into walls, doors, cubicles, and furniture.</p>
+                <label>Map type<select id="plan-scope-type"><option value="floor">Floor plan</option><option value="building">Building overview</option></select></label>
+                <label>Building or floor<select id="plan-scope-id" required></select></label>
+                <label>Map name<input id="plan-name" required maxlength="160" placeholder="Building A · First floor"></label>
+                <label class="file-field">PDF drawing<input id="plan-pdf" type="file" accept="application/pdf,.pdf" required><span id="plan-file-label">Choose a PDF</span></label>
+                <button id="plan-upload-button" class="primary-button" type="submit">Upload and auto-trace</button>
+                <div id="plan-upload-message" class="form-message" role="status"></div>
+              </form>
+
+              <div class="admin-card compact-card">
+                <p class="eyebrow">EDITOR</p><h2>Drawing tools</h2>
+                <label>Edit map<select id="editor-plan-select"></select></label>
+                <label class="toggle-field"><input id="show-original-plan" type="checkbox" checked> Show original drawing</label>
+                <div class="tool-grid">
+                  <button class="tool-button active" data-tool="select" type="button">Select</button>
+                  <button class="tool-button" data-tool="wall" type="button">Wall</button>
+                  <button class="tool-button" data-tool="door" type="button">Door</button>
+                  <button class="tool-button" data-tool="cubicle" type="button">Cubicle</button>
+                  <button class="tool-button" data-tool="furniture" type="button">Furniture</button>
+                  <button class="tool-button" data-tool="region" type="button">Region</button>
+                </div>
+                <p id="editor-hint" class="help-text">Select traced lines or regions. Drag endpoints to adjust them.</p>
+                <div class="form-actions stack-actions">
+                  <button id="finish-region-button" class="secondary-button" type="button" hidden>Finish region boundary</button>
+                  <button id="delete-selection-button" class="danger-button" type="button" disabled>Delete selected item</button>
+                  <button id="save-trace-button" class="primary-button" type="button">Save traced drawing</button>
+                </div>
+              </div>
+
+              <form id="region-form" class="admin-card compact-card" hidden>
+                <p class="eyebrow">SERVICE AREA</p><h2 id="region-form-title">New region</h2>
+                <input id="region-id" type="hidden">
+                <label>Name<input id="region-name" required maxlength="160" placeholder="Northwest offices"></label>
+                <label>Highlight color<input id="region-color" type="color" value="#2cc7d2"></label>
+                <label>FAV box<input id="region-fav" maxlength="160" placeholder="FAV-1-12"></label>
+                <label>Metasys point reference<input id="region-object-id" maxlength="1024" placeholder="SERVER:DEVICE/FAV.ZN-T"></label>
+                <label>Attribute<input id="region-attribute-id" maxlength="64" value="85"><small>Legacy Present Value is usually 85; REST uses presentValue.</small></label>
+                <div class="form-actions"><button class="primary-button" type="submit">Save region</button><button id="region-cancel" class="text-button" type="button">Cancel</button></div>
+              </form>
+            </aside>
+            <div class="editor-main">
+              <div class="editor-topline"><span id="editor-plan-name">Choose a map to edit</span><span id="editor-selection-label">No selection</span></div>
+              <div id="map-editor" class="map-stage editor-stage"></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="admin-users" class="admin-pane" hidden>
+          <div class="users-layout">
+            <form id="user-form" class="admin-card user-form">
+              <p class="eyebrow">ACCOUNT</p><h2 id="user-form-title">Create user</h2>
+              <input id="user-id" type="hidden">
+              <label>Display name<input id="user-display-name" required maxlength="120"></label>
+              <label>Email<input id="user-email" type="email" required maxlength="254"></label>
+              <label>Role<select id="user-role"><option value="viewOnly">View only</option><option value="reportingStaff">Reporting staff</option><option value="operator">Operator</option><option value="admin">Admin</option></select></label>
+              <label>Password<input id="user-password" type="password" autocomplete="new-password" minlength="12" maxlength="256"><small id="user-password-help">Required for a new account; 12 characters minimum.</small></label>
+              <label class="toggle-field"><input id="user-active" type="checkbox" checked> Account active</label>
+              <fieldset id="user-scopes"><legend>Assigned floors and regions</legend><p class="help-text">View-only and reporting staff see only checked spaces. Selecting a floor grants every region on that floor.</p><div id="scope-list" class="scope-list"></div></fieldset>
+              <div class="form-actions"><button class="primary-button" type="submit">Save user</button><button id="user-clear" class="text-button" type="button">Clear</button></div>
+              <div id="user-form-message" class="form-message" role="status"></div>
+            </form>
+            <div id="user-list" class="user-list"></div>
+          </div>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="report-dialog" class="modal-dialog">
+    <form id="report-form" method="dialog">
+      <header><div><p class="eyebrow">NEW SERVICE REQUEST</p><h2 id="report-region-name">Report an issue</h2></div><button id="report-close" class="icon-button" type="button" aria-label="Close">×</button></header>
+      <input id="report-region-id" type="hidden">
+      <label>Contact email<input id="report-contact-email" type="email" required maxlength="254"></label>
+      <label>Type of issue<select id="report-issue-type" required><option value="too_hot">Too hot</option><option value="too_cold">Too cold</option><option value="lighting">Lighting</option><option value="water_leak">Water leak</option><option value="noise">Noise</option><option value="broken_toilet">Broken toilet</option><option value="air_quality">Air quality</option><option value="other">Other</option></select></label>
+      <label>Details<textarea id="report-details" rows="5" maxlength="2000" placeholder="Tell the maintenance team what you observed."></textarea></label>
+      <div id="report-message" class="form-message" role="status"></div>
+      <footer><button id="report-cancel" class="secondary-button" type="button">Cancel</button><button class="primary-button" type="submit">Submit request</button></footer>
+    </form>
+  </dialog>
+</body>
+</html>

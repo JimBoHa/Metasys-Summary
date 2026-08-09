@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Result;
 use chrono::Utc;
@@ -13,6 +13,7 @@ use crate::{
     },
     metasys::MetasysClient,
     models::{AlarmRecord, DashboardView, HealthView, OverrideRecord},
+    portal::models::{PortalMapView, PortalUserRecord, TemperatureReading},
     sql_trends::{
         SqlTrendSettingsUpdate, SqlTrendSettingsView, TrendResponse, clear_sql_password,
         fetch_trends, set_sql_password, test_connection,
@@ -27,6 +28,13 @@ struct LiveData {
     overrides: Vec<OverrideRecord>,
 }
 
+#[derive(Clone)]
+struct CachedTemperature {
+    mapping_key: String,
+    reading: TemperatureReading,
+    cached_at: chrono::DateTime<Utc>,
+}
+
 pub struct AppState {
     pub config: Arc<Config>,
     store: Arc<Store>,
@@ -34,6 +42,7 @@ pub struct AppState {
     live: RwLock<LiveData>,
     poll_lock: Mutex<()>,
     report_send_lock: Mutex<()>,
+    temperature_cache: RwLock<HashMap<String, CachedTemperature>>,
 }
 
 impl AppState {
@@ -46,6 +55,7 @@ impl AppState {
             live: RwLock::new(LiveData::default()),
             poll_lock: Mutex::new(()),
             report_send_lock: Mutex::new(()),
+            temperature_cache: RwLock::new(HashMap::new()),
         })
     }
 
@@ -247,5 +257,71 @@ impl AppState {
     pub async fn sql_trends(&self, hours: i64) -> Result<TrendResponse> {
         let settings = self.store.sql_trend_settings()?;
         fetch_trends(&settings, hours).await
+    }
+
+    pub(crate) fn store(&self) -> &Store {
+        &self.store
+    }
+
+    pub async fn portal_map(&self, user: &PortalUserRecord) -> Result<PortalMapView> {
+        let mut map = self.store.portal_map(user)?;
+        for building in &mut map.buildings {
+            for floor in &mut building.floors {
+                for region in &mut floor.regions {
+                    let Some(record) = self.store.region_record(&region.id)? else {
+                        continue;
+                    };
+                    if record.metasys_object_id.trim().is_empty() {
+                        continue;
+                    }
+                    region.temperature = Some(self.temperature_for_region(&record).await);
+                }
+            }
+        }
+        Ok(map)
+    }
+
+    pub async fn temperature_for_region(
+        &self,
+        region: &crate::portal::models::RegionRecord,
+    ) -> TemperatureReading {
+        let mapping_key = format!(
+            "{}:{}",
+            region.metasys_object_id, region.metasys_attribute_id
+        );
+        if let Some(cached) = self.temperature_cache.read().await.get(&region.id)
+            && cached.mapping_key == mapping_key
+            && Utc::now() - cached.cached_at < chrono::Duration::seconds(30)
+        {
+            return cached.reading.clone();
+        }
+        let reading = match self
+            .client
+            .read_temperature(&region.metasys_object_id, &region.metasys_attribute_id)
+            .await
+        {
+            Ok(reading) => reading,
+            Err(error) => {
+                tracing::warn!(region_id = %region.id, error = %error, "Metasys temperature read failed");
+                TemperatureReading {
+                    value: None,
+                    display_value: "Unavailable".to_owned(),
+                    unit: String::new(),
+                    status: "Unavailable".to_owned(),
+                    observed_at: Utc::now(),
+                    available: false,
+                    error: Some("Live temperature is temporarily unavailable".to_owned()),
+                }
+            }
+        };
+        self.temperature_cache.write().await.insert(
+            region.id.clone(),
+            CachedTemperature {
+                mapping_key,
+                reading: reading.clone(),
+                cached_at: Utc::now(),
+            },
+        );
+        reading
     }
 }

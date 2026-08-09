@@ -6,10 +6,26 @@ let dashboardData = null;
 let sqlTrendData = null;
 let refreshTimer = null;
 let reportRecipients = [];
+let csrfToken = "";
 
 const $ = (id) => document.getElementById(id);
 
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
+  try {
+    const response = await window.fetch("/api/portal/me", { cache: "no-store" });
+    if (!response.ok) {
+      window.location.assign("/");
+      return;
+    }
+    const session = await response.json();
+    csrfToken = session.csrfToken;
+    const canManageSettings = session.user.role === "admin";
+    $("report-settings-button").hidden = !canManageSettings;
+    $("sql-settings-button").hidden = !canManageSettings;
+  } catch (_) {
+    window.location.assign("/");
+    return;
+  }
   $("refresh-button").addEventListener("click", manualRefresh);
   $("report-settings-button").addEventListener("click", openReportSettings);
   $("report-settings-close").addEventListener("click", () => $("report-settings-dialog").close());
@@ -45,9 +61,20 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 });
 
+function portalFetch(resource, options = {}) {
+  const headers = new Headers(options.headers || {});
+  const method = (options.method || "GET").toUpperCase();
+  if (!matchesSafeMethod(method) && csrfToken) headers.set("X-CSRF-Token", csrfToken);
+  return window.fetch(resource, { ...options, headers, credentials: "same-origin" });
+}
+
+function matchesSafeMethod(method) {
+  return method === "GET" || method === "HEAD" || method === "OPTIONS";
+}
+
 async function loadDashboard() {
   try {
-    const response = await fetch("/api/dashboard", { cache: "no-store" });
+    const response = await portalFetch("/api/dashboard", { cache: "no-store" });
     if (!response.ok) throw new Error(`Dashboard API returned ${response.status}`);
     dashboardData = await response.json();
     renderDashboard(dashboardData);
@@ -61,7 +88,7 @@ async function manualRefresh() {
   button.disabled = true;
   button.classList.add("loading");
   try {
-    await fetch("/api/refresh", { method: "POST" });
+    await portalFetch("/api/refresh", { method: "POST" });
     await wait(700);
     await loadDashboard();
   } finally {
@@ -75,7 +102,7 @@ async function openReportSettings() {
   showReportMessage("Loading settings…");
   if (!dialog.open) dialog.showModal();
   try {
-    const response = await fetch("/api/settings/reports", { cache: "no-store" });
+    const response = await portalFetch("/api/settings/reports", { cache: "no-store" });
     if (!response.ok) throw new Error(await apiError(response));
     const settings = await response.json();
     $("report-enabled").checked = settings.enabled;
@@ -183,7 +210,7 @@ async function saveReportSettings(event) {
   button.disabled = true;
   showReportMessage("Saving…");
   try {
-    const response = await fetch("/api/settings/reports", {
+    const response = await portalFetch("/api/settings/reports", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(reportSettingsPayload())
@@ -207,7 +234,7 @@ async function testSmtpConnection() {
   button.disabled = true;
   showReportMessage("Testing saved SMTP connection…");
   try {
-    const response = await fetch("/api/settings/reports/test", { method: "POST" });
+    const response = await portalFetch("/api/settings/reports/test", { method: "POST" });
     if (!response.ok) throw new Error(await apiError(response));
     showReportMessage("SMTP connection successful.");
   } catch (error) {
@@ -222,7 +249,7 @@ async function sendReportNow() {
   button.disabled = true;
   showReportMessage("Building and sending report…");
   try {
-    const response = await fetch("/api/reports/send", { method: "POST" });
+    const response = await portalFetch("/api/reports/send", { method: "POST" });
     if (!response.ok) throw new Error(await apiError(response));
     const result = await response.json();
     showReportMessage(`Report sent to ${numberFormat.format(result.recipientCount)} recipient${result.recipientCount === 1 ? "" : "s"}.`);
@@ -429,7 +456,7 @@ async function openSqlSettings() {
   showFormMessage("Loading settings…");
   if (!dialog.open) dialog.showModal();
   try {
-    const response = await fetch("/api/settings/sql", { cache: "no-store" });
+    const response = await portalFetch("/api/settings/sql", { cache: "no-store" });
     if (!response.ok) throw new Error(await apiError(response));
     const settings = await response.json();
     $("sql-enabled").checked = settings.enabled;
@@ -466,7 +493,7 @@ async function saveSqlSettings(event) {
     query: $("sql-query").value
   };
   try {
-    const response = await fetch("/api/settings/sql", {
+    const response = await portalFetch("/api/settings/sql", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
@@ -490,7 +517,7 @@ async function testSqlConnection() {
   button.disabled = true;
   showFormMessage("Testing saved SQL Server connection…");
   try {
-    const response = await fetch("/api/settings/sql/test", { method: "POST" });
+    const response = await portalFetch("/api/settings/sql/test", { method: "POST" });
     if (!response.ok) throw new Error(await apiError(response));
     showFormMessage("Connection successful.");
   } catch (error) {
@@ -506,7 +533,7 @@ async function loadSqlTrends() {
   setTrendMessage("Loading SQL trend samples…");
   try {
     const hours = Number($("trend-range").value);
-    const response = await fetch(`/api/trends?hours=${encodeURIComponent(hours)}`, { cache: "no-store" });
+    const response = await portalFetch(`/api/trends?hours=${encodeURIComponent(hours)}`, { cache: "no-store" });
     if (!response.ok) throw new Error(await apiError(response));
     sqlTrendData = await response.json();
     drawSqlTrendChart();

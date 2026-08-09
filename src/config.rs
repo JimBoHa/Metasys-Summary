@@ -133,6 +133,7 @@ impl Config {
 
         let database_path = env::var_os("METASYS_DATABASE_PATH")
             .map(PathBuf::from)
+            .or_else(|| force_demo.then(|| default_data_dir.join("dashboard-demo.sqlite3")))
             .or(file.database_path)
             .unwrap_or_else(|| default_data_dir.join("dashboard.sqlite3"));
 

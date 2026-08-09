@@ -18,6 +18,7 @@ use tokio::sync::Mutex;
 use crate::{
     config::{Config, ConnectorPreference},
     models::{AlarmRecord, PollData},
+    portal::models::TemperatureReading,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,6 +32,8 @@ struct AuthSession {
     connector: ResolvedConnector,
     token: String,
     expires_at: DateTime<Utc>,
+    client_id: Option<String>,
+    authorization_data: Option<String>,
 }
 
 #[derive(Default)]
@@ -43,6 +46,7 @@ pub struct MetasysClient {
     config: Arc<Config>,
     http: Client,
     state: Mutex<RuntimeState>,
+    legacy_signalr: Mutex<Option<legacy::LegacySignalrConnection>>,
 }
 
 impl MetasysClient {
@@ -58,6 +62,7 @@ impl MetasysClient {
             config,
             http,
             state: Mutex::new(RuntimeState::default()),
+            legacy_signalr: Mutex::new(None),
         })
     }
 
@@ -83,8 +88,49 @@ impl MetasysClient {
         };
         if result.is_err() {
             self.state.lock().await.session = None;
+            self.legacy_signalr.lock().await.take();
         }
         result
+    }
+
+    pub async fn read_temperature(
+        &self,
+        object_id: &str,
+        attribute_id: &str,
+    ) -> Result<TemperatureReading> {
+        if self.config.password.is_none() {
+            bail!("Metasys password is missing");
+        }
+        if object_id.trim().is_empty() {
+            bail!("temperature point is not mapped");
+        }
+        let connector = self.resolve_connector().await?;
+        let session = self.ensure_session(&connector).await?;
+        match &session.connector {
+            ResolvedConnector::Modern { version } => {
+                modern::read_temperature(
+                    &self.http,
+                    &self.config,
+                    &session.token,
+                    version,
+                    object_id,
+                    attribute_id,
+                )
+                .await
+            }
+            ResolvedConnector::Legacy => {
+                let mut signalr = self.legacy_signalr.lock().await;
+                legacy::read_temperature(
+                    &self.http,
+                    &self.config,
+                    &session,
+                    object_id,
+                    attribute_id,
+                    &mut signalr,
+                )
+                .await
+            }
+        }
     }
 
     async fn resolve_connector(&self) -> Result<ResolvedConnector> {
@@ -197,6 +243,20 @@ fn first_u64(value: &Value, pointers: &[&str]) -> Option<u64> {
     pointers.iter().find_map(|pointer| {
         let item = value.pointer(pointer)?;
         item.as_u64().or_else(|| item.as_str()?.parse::<u64>().ok())
+    })
+}
+
+fn first_f64(value: &Value, pointers: &[&str]) -> Option<f64> {
+    pointers.iter().find_map(|pointer| {
+        let item = value.pointer(pointer)?;
+        item.as_f64().or_else(|| {
+            item.as_str()?
+                .trim()
+                .trim_end_matches(['°', 'F', 'C'])
+                .trim()
+                .parse::<f64>()
+                .ok()
+        })
     })
 }
 

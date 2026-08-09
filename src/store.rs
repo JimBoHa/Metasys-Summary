@@ -76,6 +76,7 @@ impl Store {
             .context("initialize SQLite schema")?;
 
         ensure_occurrence_column(&connection)?;
+        crate::portal::store::initialize_schema(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -340,7 +341,7 @@ impl Store {
             last_error,
         })
     }
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+    pub(crate) fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         self.connection
             .lock()
             .map_err(|_| anyhow!("SQLite connection lock poisoned"))
