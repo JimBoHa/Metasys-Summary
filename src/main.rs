@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -135,10 +135,13 @@ async fn serve(mut config: Config, cli_open_browser: bool) -> Result<()> {
         });
     }
 
-    axum::serve(listener, web::router(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("run dashboard web server")
+    axum::serve(
+        listener,
+        web::router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("run dashboard web server")
 }
 
 async fn shutdown_signal() {
