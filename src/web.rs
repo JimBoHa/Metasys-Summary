@@ -414,6 +414,55 @@ mod tests {
         let status = json_body(response).await;
         assert_eq!(status["initialized"], false);
         assert_eq!(status["bootstrapAllowed"], true);
+        assert_eq!(status["localConfigurationAllowed"], true);
+        assert_eq!(status["metasysConfigured"], false);
+
+        let response = call(
+            &app,
+            request(Method::GET, "/api/portal/metasys-settings", None, None),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let settings = json_body(response).await;
+        assert_eq!(settings["passwordConfigured"], false);
+        assert_eq!(settings["serverUrl"], "https://metasys.example.invalid");
+
+        let mut remote_settings = request(Method::GET, "/api/portal/metasys-settings", None, None);
+        remote_settings
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from((
+                Ipv4Addr::new(192, 0, 2, 10),
+                41000,
+            ))));
+        assert_eq!(
+            call(&app, remote_settings).await.status(),
+            StatusCode::FORBIDDEN
+        );
+
+        let invalid_connection = json!({
+            "serverUrl": "https://metasys.example.invalid",
+            "username": "browser-user",
+            "password": "connection-password",
+            "passwordConfirmation": "different-password",
+            "domain": "Metasys Local",
+            "connector": "auto",
+            "apiVersion": "auto",
+            "acceptInvalidCertificates": false
+        });
+        assert_eq!(
+            call(
+                &app,
+                request(
+                    Method::PUT,
+                    "/api/portal/metasys-settings",
+                    Some(invalid_connection.clone()),
+                    None,
+                ),
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
 
         let body = json!({
             "displayName": "Initial Administrator",
@@ -427,9 +476,10 @@ mod tests {
             Some(body.clone()),
             None,
         );
-        lan_host
-            .headers_mut()
-            .insert(header::HOST, HeaderValue::from_static("10.255.0.24:3030"));
+        lan_host.headers_mut().insert(
+            header::HOST,
+            HeaderValue::from_static("portal.example.test:3030"),
+        );
         assert_eq!(call(&app, lan_host).await.status(), StatusCode::FORBIDDEN);
 
         let mut remote_peer = request(
@@ -488,6 +538,40 @@ mod tests {
             .await
             .status(),
             StatusCode::OK
+        );
+        assert_eq!(
+            call(
+                &app,
+                request(Method::GET, "/api/portal/metasys-settings", None, None,),
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(
+                &app,
+                request(
+                    Method::GET,
+                    "/api/portal/metasys-settings",
+                    None,
+                    Some(&login),
+                ),
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let mut missing_csrf = request(
+            Method::PUT,
+            "/api/portal/metasys-settings",
+            Some(invalid_connection),
+            Some(&login),
+        );
+        missing_csrf.headers_mut().remove("x-csrf-token");
+        assert_eq!(
+            call(&app, missing_csrf).await.status(),
+            StatusCode::FORBIDDEN
         );
 
         let response = call(&app, request(Method::GET, "/api/portal/status", None, None)).await;
@@ -635,6 +719,20 @@ mod tests {
         );
 
         let viewer = login(&app, "viewer@example.test").await;
+        assert_eq!(
+            call(
+                &app,
+                request(
+                    Method::GET,
+                    "/api/portal/metasys-settings",
+                    None,
+                    Some(&viewer),
+                ),
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
         let response = call(
             &app,
             request(Method::GET, "/api/portal/map", None, Some(&viewer)),

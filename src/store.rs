@@ -5,7 +5,8 @@ use chrono::{DateTime, Duration, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{
-    email_reports::EmailReportSettings, models::AlarmRecord, sql_trends::SqlTrendSettings,
+    config::MetasysConnectionSettings, email_reports::EmailReportSettings, models::AlarmRecord,
+    sql_trends::SqlTrendSettings,
 };
 
 pub struct ReportDeliveryStatus {
@@ -282,6 +283,40 @@ impl Store {
         Ok(())
     }
 
+    pub fn metasys_connection_settings(&self) -> Result<Option<MetasysConnectionSettings>> {
+        let connection = self.lock()?;
+        let value: Option<String> = connection
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'metasys_connection'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        value
+            .map(|value| serde_json::from_str(&value).context("decode Metasys connection settings"))
+            .transpose()
+    }
+
+    pub fn save_metasys_connection_settings(
+        &self,
+        settings: &MetasysConnectionSettings,
+    ) -> Result<()> {
+        let connection = self.lock()?;
+        let value =
+            serde_json::to_string(settings).context("encode Metasys connection settings")?;
+        connection.execute(
+            r#"
+            INSERT INTO app_settings (key, value, updated_at)
+            VALUES ('metasys_connection', ?1, ?2)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            "#,
+            params![value, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
     pub fn record_report_delivery(
         &self,
         succeeded: bool,
@@ -436,5 +471,31 @@ mod tests {
         let loaded = store.sql_trend_settings().unwrap();
         assert_eq!(loaded.host, "sql.example.invalid");
         assert_eq!(loaded.database, "MetasysTrends");
+    }
+
+    #[test]
+    fn stores_non_secret_metasys_connection_settings() {
+        let directory = tempdir().unwrap();
+        let store = Store::open(&directory.path().join("test.sqlite3")).unwrap();
+        let settings = crate::config::MetasysConnectionSettings {
+            server_url: "https://metasys.example.test".to_owned(),
+            username: "browser-user".to_owned(),
+            domain: "Metasys Local".to_owned(),
+            connector: crate::config::ConnectorPreference::Legacy,
+            api_version: "auto".to_owned(),
+            accept_invalid_certificates: true,
+        };
+        store.save_metasys_connection_settings(&settings).unwrap();
+        let loaded = store.metasys_connection_settings().unwrap().unwrap();
+        assert_eq!(loaded, settings);
+        let connection = store.lock().unwrap();
+        let stored: String = connection
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'metasys_connection'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!stored.to_ascii_lowercase().contains("password"));
     }
 }

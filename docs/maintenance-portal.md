@@ -2,9 +2,11 @@
 
 The maintenance portal is the root page of the Rust service. It uses the same local SQLite database and read-only Metasys connector as the operations dashboard, but has its own user accounts and permissions.
 
-## 1. Create the first administrator
+## 1. Connect Metasys and create the first administrator
 
-Start the service and open `http://127.0.0.1:3030` in a browser running on the host Mac. Complete the first-run form; setup is deliberately unavailable through the Mac's LAN address so another network user cannot claim the installation. The resulting Argon2id hash—not the password—is stored in SQLite.
+Start the service and open `http://127.0.0.1:3030` in a browser running on the host Mac. In step 1, enter the Metasys server URL, username, password, connector, API version, legacy domain, and certificate policy. The app fetches live records to validate the connection before saving. Non-secret settings are stored in SQLite, while the password is stored only in macOS Keychain. The tested client becomes active immediately without restarting.
+
+In step 2, create the first portal administrator. Setup is deliberately unavailable through the Mac's LAN address so another network user cannot claim the installation. The resulting Argon2id portal-password hash—not the password—is stored in SQLite.
 
 The hidden terminal prompt is also available:
 
@@ -12,7 +14,7 @@ The hidden terminal prompt is also available:
 cargo run -- portal-admin --email you@example.com --name "Your Name"
 ```
 
-The browser form signs in the new administrator immediately. If the terminal command was used, open the portal and sign in. Additional users are created from **Administration → Users & access**.
+The browser form signs in the new administrator immediately. If the terminal command was used, open the portal and sign in. Additional users are created from **Administration → Users & access**. Administrators can later change the live connection from the host Mac under **Administration → Metasys connection**.
 
 ## 2. Create the site hierarchy
 

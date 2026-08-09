@@ -12,7 +12,9 @@ Copy `config.example.toml` to:
 ~/Library/Application Support/Metasys Dashboard/config.toml
 ```
 
-Set `server_url` and `username` for your site. Store the password in macOS Keychain; never put it in the TOML file:
+The TOML file controls service options such as bind address, port, polling interval, and database location. Start the service and open `http://127.0.0.1:3030` to configure the Metasys server URL, username, password, connector, API version, domain, and certificate policy in the browser. The app tests the connection before saving; the password goes directly to macOS Keychain and never enters TOML or SQLite.
+
+The hidden Terminal prompt remains available as a recovery option:
 
 ```bash
 cargo run -- configure
@@ -20,7 +22,7 @@ cargo run -- configure
 
 The password is never written to this repository, the TOML configuration, SQLite, or logs.
 
-Start the service, open `http://127.0.0.1:3030` in a browser on the host Mac, and use the first-run form to create the initial administrator. For security, first-run setup is not available over the LAN. The terminal command remains available as an alternative:
+Use the second step of the browser setup page to create the initial administrator. For security, connection and first-administrator setup are not available over the LAN. The terminal command remains available as a recovery option:
 
 ```bash
 cargo run -- portal-admin --email you@example.com --name "Your Name"
@@ -81,6 +83,8 @@ Modern Metasys REST versions v2-v6 are auto-detected. REST v5/v6 uses activities
 ## Maintenance portal
 
 Administrators create buildings and floors, upload a building-overview PDF and floor PDFs, review the locally generated clean traces, draw named service regions, map each region to its FAV/temperature point, and assign user access. Reporting staff can view assigned spaces and submit requests; view-only staff cannot submit; operators can see all spaces and update requests; administrators have full control.
+
+Administrators working from the host Mac can update and test the live Metasys connection under **Administration → Metasys connection**. A successful save activates the new client immediately without restarting the service.
 
 PDFs are processed locally on macOS and are not sent to an external service. The automatic trace is a starting point and must be reviewed by an administrator. See [maintenance portal setup](docs/maintenance-portal.md).
 

@@ -4,6 +4,8 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 const app = {
   session: null,
   map: null,
+  metasysSettings: null,
+  localConfigurationAllowed: false,
   users: [],
   requests: [],
   activeView: "home",
@@ -31,6 +33,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 });
 
 function bindEvents() {
+  $("setup-metasys-form").addEventListener("submit", (event) => saveMetasysConnection(event, "setup"));
   $("setup-form").addEventListener("submit", bootstrapAdministrator);
   $("login-form").addEventListener("submit", signIn);
   $("logout-button").addEventListener("click", signOut);
@@ -65,6 +68,7 @@ function bindEvents() {
   $("user-form").addEventListener("submit", saveUser);
   $("user-clear").addEventListener("click", clearUserForm);
   $("user-role").addEventListener("change", updateUserScopeVisibility);
+  $("admin-metasys-form").addEventListener("submit", (event) => saveMetasysConnection(event, "admin"));
 
   $("report-form").addEventListener("submit", submitServiceRequest);
   $("report-close").addEventListener("click", closeReportDialog);
@@ -74,11 +78,14 @@ function bindEvents() {
 async function initializePortal() {
   try {
     const status = await request("/api/portal/status", { allowUnauthorized: true });
+    app.localConfigurationAllowed = Boolean(status.localConfigurationAllowed);
     if (!status.initialized) {
       $("setup-notice").hidden = false;
+      $("setup-metasys-form").hidden = !status.bootstrapAllowed;
       $("setup-form").hidden = !status.bootstrapAllowed;
       $("setup-local-only").hidden = status.bootstrapAllowed;
       $("login-form").hidden = true;
+      if (status.bootstrapAllowed) await loadMetasysSettings("setup", true);
       return;
     }
     try {
@@ -89,6 +96,80 @@ async function initializePortal() {
     }
   } catch (error) {
     showLoginMessage(error.message || "Portal service unavailable", true);
+  }
+}
+
+async function loadMetasysSettings(prefix, allowUnauthorized = false) {
+  try {
+    const settings = await request("/api/portal/metasys-settings", { allowUnauthorized });
+    app.metasysSettings = settings;
+    populateMetasysForm(prefix, settings);
+    showFormMessage(`${prefix}-metasys-message`, "");
+    return settings;
+  } catch (error) {
+    showFormMessage(`${prefix}-metasys-message`, error.message || "Unable to load Metasys settings", true);
+    return null;
+  }
+}
+
+function populateMetasysForm(prefix, settings) {
+  $(`${prefix}-metasys-server-url`).value = settings.serverUrl || "";
+  $(`${prefix}-metasys-username`).value = settings.username || "";
+  $(`${prefix}-metasys-domain`).value = settings.domain || "Metasys Local";
+  $(`${prefix}-metasys-connector`).value = settings.connector || "auto";
+  $(`${prefix}-metasys-api-version`).value = settings.apiVersion || "auto";
+  $(`${prefix}-metasys-invalid-certificates`).checked = Boolean(settings.acceptInvalidCertificates);
+  setText(
+    `${prefix}-metasys-password-state`,
+    settings.passwordConfigured ? "Password saved in macOS Keychain." : "No password saved for this connection."
+  );
+}
+
+async function saveMetasysConnection(event, prefix) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  if (!form.reportValidity()) return;
+  const password = $(`${prefix}-metasys-password`).value;
+  const passwordConfirmation = $(`${prefix}-metasys-password-confirmation`).value;
+  if (password !== passwordConfirmation) {
+    showFormMessage(`${prefix}-metasys-message`, "Password confirmation does not match.", true);
+    return;
+  }
+  const button = $(`${prefix}-metasys-button`);
+  button.disabled = true;
+  showFormMessage(`${prefix}-metasys-message`, "Testing the live Metasys connection… Approve macOS Keychain access if prompted.");
+  try {
+    const result = await request("/api/portal/metasys-settings", {
+      method: "PUT",
+      body: {
+        serverUrl: $(`${prefix}-metasys-server-url`).value,
+        username: $(`${prefix}-metasys-username`).value,
+        password,
+        passwordConfirmation,
+        domain: $(`${prefix}-metasys-domain`).value,
+        connector: $(`${prefix}-metasys-connector`).value,
+        apiVersion: $(`${prefix}-metasys-api-version`).value,
+        acceptInvalidCertificates: $(`${prefix}-metasys-invalid-certificates`).checked
+      },
+      allowUnauthorized: !app.session
+    });
+    app.metasysSettings = result.settings;
+    populateMetasysForm(prefix, result.settings);
+    $(`${prefix}-metasys-password`).value = "";
+    $(`${prefix}-metasys-password-confirmation`).value = "";
+    const version = result.serverVersion ? ` · server ${result.serverVersion}` : "";
+    showFormMessage(
+      `${prefix}-metasys-message`,
+      `Connected through ${result.connector}${version}. Loaded ${result.alarmRecords} real alarm records and ${result.overrides} overrides.`
+    );
+    if (app.session) {
+      await loadMap();
+      showGlobalMessage("Metasys connection tested, saved, and activated.");
+    }
+  } catch (error) {
+    showFormMessage(`${prefix}-metasys-message`, error.message || "Unable to configure Metasys", true);
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -157,7 +238,13 @@ async function enterPortal(session) {
   const isOperator = session.user.role === "operator";
   $("admin-nav").hidden = !isAdmin;
   $("operations-link").hidden = !(isAdmin || isOperator);
-  await Promise.all([loadMap(), loadRequests(), isAdmin ? loadUsers() : Promise.resolve()]);
+  $("admin-metasys-tab").hidden = !isAdmin || !app.localConfigurationAllowed;
+  await Promise.all([
+    loadMap(),
+    loadRequests(),
+    isAdmin ? loadUsers() : Promise.resolve(),
+    isAdmin && app.localConfigurationAllowed ? loadMetasysSettings("admin") : Promise.resolve()
+  ]);
   showView("home");
 }
 
@@ -185,14 +272,17 @@ function showView(name) {
 }
 
 function showAdminPane(name) {
+  if (name === "metasys" && !app.localConfigurationAllowed) return;
   $("admin-structure").hidden = name !== "structure";
   $("admin-maps").hidden = name !== "maps";
   $("admin-users").hidden = name !== "users";
+  $("admin-metasys").hidden = name !== "metasys";
   document.querySelectorAll(".admin-tab").forEach((button) => {
     button.classList.toggle("active", button.dataset.adminView === name);
   });
   if (name === "maps") renderMapAdministration();
   if (name === "users") renderUsers();
+  if (name === "metasys") loadMetasysSettings("admin");
 }
 
 async function loadMap(showSuccess = false) {

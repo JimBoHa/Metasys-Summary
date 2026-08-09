@@ -35,7 +35,7 @@ button { color: inherit; }
 .building-silhouette::after { top: 0; bottom: 0; left: 44%; width: 1px; }
 .building-silhouette span { position: relative; z-index: 1; display: inline-block; width: 9%; height: 12%; margin: 8% 2.8%; border: 1px solid rgba(105,211,222,.5); background: rgba(44,199,210,.08); }
 .login-art > p { position: absolute; bottom: 3rem; left: 3rem; margin: 0; letter-spacing: .22em; color: #79d8df; font-size: .72rem; }
-.login-panel { display: flex; flex-direction: column; justify-content: center; padding: clamp(2rem, 7vw, 7rem); background: rgba(6,16,26,.88); }
+.login-panel { position: relative; display: flex; flex-direction: column; justify-content: center; padding: clamp(6rem, 7vw, 7rem) clamp(2rem, 7vw, 7rem) 3rem; background: rgba(6,16,26,.88); }
 .brand-lockup, .app-brand { display: flex; align-items: center; gap: .85rem; color: var(--text); text-decoration: none; }
 .brand-lockup { position: absolute; top: 2.2rem; }
 .brand-lockup span:last-child, .app-brand span:last-child { display: flex; flex-direction: column; gap: .12rem; }
@@ -52,6 +52,12 @@ button { color: inherit; }
 .setup-notice > span { display: inline-block; padding: .32rem .55rem; border-radius: 1rem; background: var(--amber); color: #211805; font-size: .65rem; font-weight: 800; letter-spacing: .14em; }
 .setup-notice form p { margin-bottom: 1rem; }
 .setup-notice .primary-button { width: 100%; margin-top: .55rem; }
+.setup-notice h2 { margin: .2rem 0 .7rem; }
+.setup-step { margin: 1.4rem 0; padding: 1.1rem; border: 1px solid var(--line); border-radius: .75rem; background: rgba(8, 24, 36, .72); }
+.setup-step + form { margin-top: 2rem; padding-top: 1.5rem; border-top: 1px solid var(--line); }
+.form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .7rem; }
+.credential-state { margin: .7rem 0 !important; color: var(--muted); font-size: .72rem; }
+.connection-form { width: min(100%, 48rem); }
 
 label { display: flex; flex-direction: column; gap: .45rem; margin: 1rem 0; color: #b7cad4; font-size: .76rem; font-weight: 650; letter-spacing: .025em; }
 input, select, textarea { width: 100%; border: 1px solid var(--line-strong); border-radius: .58rem; outline: 0; background: #07131e; color: var(--text); padding: .78rem .85rem; transition: border-color .15s, box-shadow .15s, background .15s; }
@@ -239,4 +245,5 @@ button:disabled { opacity: .42; cursor: not-allowed; }
   .map-stage { min-height: 24rem; }
   .overview-stage { min-height: 18rem; }
   .scope-regions { grid-template-columns: 1fr; }
+  .form-grid { grid-template-columns: 1fr; }
 }

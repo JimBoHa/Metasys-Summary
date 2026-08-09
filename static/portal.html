@@ -25,8 +25,28 @@
       </div>
       <div id="setup-notice" class="setup-notice" hidden>
         <span>INITIAL SETUP</span>
-        <h1>Create the first administrator</h1>
+        <h1>Set up the portal</h1>
+        <form id="setup-metasys-form" class="setup-step" hidden>
+          <p class="eyebrow">STEP 1 · LIVE DATA</p>
+          <h2>Connect to Metasys</h2>
+          <p>Test the building server and save its password directly to this Mac's Keychain.</p>
+          <label>Server URL<input id="setup-metasys-server-url" type="url" required maxlength="2048" placeholder="https://metasys.example.local"></label>
+          <label>Username<input id="setup-metasys-username" autocomplete="username" required maxlength="256"></label>
+          <label>Password<input id="setup-metasys-password" type="password" autocomplete="current-password" required maxlength="1024"></label>
+          <label>Confirm password<input id="setup-metasys-password-confirmation" type="password" autocomplete="current-password" required maxlength="1024"></label>
+          <div class="form-grid">
+            <label>Connector<select id="setup-metasys-connector"><option value="auto">Auto detect</option><option value="legacy">Legacy UI</option><option value="rest">REST API</option></select></label>
+            <label>API version<select id="setup-metasys-api-version"><option value="auto">Auto detect</option><option value="v2">v2</option><option value="v3">v3</option><option value="v4">v4</option><option value="v5">v5</option><option value="v6">v6</option></select></label>
+          </div>
+          <label>Legacy domain<input id="setup-metasys-domain" required maxlength="128" value="Metasys Local"></label>
+          <label class="toggle-field"><input id="setup-metasys-invalid-certificates" type="checkbox"> Trust this server's self-signed certificate</label>
+          <p id="setup-metasys-password-state" class="credential-state">No password saved for this connection.</p>
+          <div id="setup-metasys-message" class="form-message" role="status" aria-live="polite"></div>
+          <button id="setup-metasys-button" class="primary-button" type="submit">Test connection and save</button>
+        </form>
         <form id="setup-form" hidden>
+          <p class="eyebrow">STEP 2 · SECURE ACCESS</p>
+          <h2>Create the first administrator</h2>
           <p>This first account has full access to buildings, floor plans, users, requests, and operations data.</p>
           <label>Display name<input id="setup-display-name" autocomplete="name" required maxlength="120"></label>
           <label>Email address<input id="setup-email" type="email" autocomplete="username" required maxlength="254"></label>
@@ -119,6 +139,7 @@
           <button class="admin-tab active" data-admin-view="structure" type="button">Buildings & floors</button>
           <button class="admin-tab" data-admin-view="maps" type="button">Floor-plan editor</button>
           <button class="admin-tab" data-admin-view="users" type="button">Users & access</button>
+          <button id="admin-metasys-tab" class="admin-tab" data-admin-view="metasys" type="button">Metasys connection</button>
         </div>
 
         <section id="admin-structure" class="admin-pane">
@@ -210,6 +231,26 @@
             </form>
             <div id="user-list" class="user-list"></div>
           </div>
+        </section>
+
+        <section id="admin-metasys" class="admin-pane" hidden>
+          <form id="admin-metasys-form" class="admin-card connection-form">
+            <p class="eyebrow">LIVE BUILDING DATA</p><h2>Metasys connection</h2>
+            <p class="help-text">Available only from a browser on this Mac. Saving first tests the credentials; passwords go directly to macOS Keychain and are never stored in this database or repository.</p>
+            <label>Server URL<input id="admin-metasys-server-url" type="url" required maxlength="2048" placeholder="https://metasys.example.local"></label>
+            <label>Username<input id="admin-metasys-username" autocomplete="username" required maxlength="256"></label>
+            <label>Password<input id="admin-metasys-password" type="password" autocomplete="current-password" required maxlength="1024"><small>Enter the password each time settings are changed.</small></label>
+            <label>Confirm password<input id="admin-metasys-password-confirmation" type="password" autocomplete="current-password" required maxlength="1024"></label>
+            <div class="form-grid">
+              <label>Connector<select id="admin-metasys-connector"><option value="auto">Auto detect</option><option value="legacy">Legacy UI</option><option value="rest">REST API</option></select></label>
+              <label>API version<select id="admin-metasys-api-version"><option value="auto">Auto detect</option><option value="v2">v2</option><option value="v3">v3</option><option value="v4">v4</option><option value="v5">v5</option><option value="v6">v6</option></select></label>
+            </div>
+            <label>Legacy domain<input id="admin-metasys-domain" required maxlength="128" value="Metasys Local"></label>
+            <label class="toggle-field"><input id="admin-metasys-invalid-certificates" type="checkbox"> Trust this server's self-signed certificate</label>
+            <p id="admin-metasys-password-state" class="credential-state">Checking Keychain state…</p>
+            <div id="admin-metasys-message" class="form-message" role="status" aria-live="polite"></div>
+            <button id="admin-metasys-button" class="primary-button" type="submit">Test connection and save</button>
+          </form>
         </section>
       </section>
     </main>

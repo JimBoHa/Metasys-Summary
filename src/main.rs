@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use metasys_dashboard::{
     app::AppState,
-    config::{Config, store_password},
+    config::{BROWSER_KEYCHAIN_SERVICE, Config, load_password, store_password},
     metasys::MetasysClient,
     portal::{auth::hash_password, models::PortalRole},
     store::Store,
@@ -70,7 +70,7 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let config = Config::load(cli.config.as_deref(), cli.demo)?;
+    let mut config = Config::load(cli.config.as_deref(), cli.demo)?;
     match cli.command {
         Some(Command::Configure {
             username,
@@ -79,12 +79,18 @@ async fn main() -> Result<()> {
             username.unwrap_or_else(|| config.username.clone()),
             keychain_service.unwrap_or(config.keychain_service),
         ),
-        Some(Command::Check) => check(config).await,
+        Some(Command::Check) => {
+            config.hydrate_password();
+            check(config).await
+        }
         Some(Command::PortalAdmin { email, name }) => create_portal_admin(config, email, name),
         Some(Command::CheckTemperature {
             reference,
             attribute,
-        }) => check_temperature(config, reference, attribute).await,
+        }) => {
+            config.hydrate_password();
+            check_temperature(config, reference, attribute).await
+        }
         None => serve(config, cli.open_browser || launched_from_app_bundle()).await,
     }
 }
@@ -153,8 +159,18 @@ async fn serve(mut config: Config, cli_open_browser: bool) -> Result<()> {
         config.open_browser = true;
     }
     config.ensure_data_directory()?;
-    let config = Arc::new(config);
     let store = Arc::new(Store::open(&config.database_path)?);
+    if let Some(settings) = store.metasys_connection_settings()? {
+        settings.validate()?;
+        let password = config
+            .password
+            .clone()
+            .or_else(|| load_password(BROWSER_KEYCHAIN_SERVICE, &settings.username));
+        config.apply_metasys_connection(&settings, password);
+    } else {
+        config.hydrate_password();
+    }
+    let config = Arc::new(config);
     let state = Arc::new(AppState::new(config.clone(), store)?);
 
     let poll_state = state.clone();

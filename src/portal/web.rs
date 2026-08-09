@@ -12,6 +12,7 @@ use axum::{
 use serde_json::json;
 
 use crate::app::AppState;
+use crate::config::MetasysConnectionUpdate;
 
 use super::{
     auth::{
@@ -39,6 +40,10 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/portal.js", get(portal_javascript))
         .route("/portal.css", get(portal_stylesheet))
         .route("/api/portal/status", get(portal_status))
+        .route(
+            "/api/portal/metasys-settings",
+            get(metasys_settings).put(update_metasys_settings),
+        )
         .route("/api/portal/bootstrap", post(bootstrap))
         .route("/api/portal/login", post(login))
         .route("/api/portal/logout", post(logout))
@@ -117,10 +122,45 @@ async fn portal_status(
         .portal_user_count()
         .map_err(PortalError::internal)?
         > 0;
+    let metasys_configured = state
+        .metasys_connection_settings()
+        .await
+        .password_configured;
+    let local_configuration_allowed = local_bootstrap_request(peer, &headers);
     Ok(Json(json!({
         "initialized": initialized,
-        "bootstrapAllowed": !initialized && local_bootstrap_request(peer, &headers),
+        "bootstrapAllowed": !initialized && local_configuration_allowed,
+        "localConfigurationAllowed": local_configuration_allowed,
+        "metasysConfigured": metasys_configured,
     })))
+}
+
+async fn metasys_settings(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<crate::config::MetasysConnectionView>, PortalError> {
+    require_local_configuration_access(peer, &state, &headers)?;
+    Ok(Json(state.metasys_connection_settings().await))
+}
+
+async fn update_metasys_settings(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(input): Json<MetasysConnectionUpdate>,
+) -> Result<Json<crate::config::MetasysConnectionResult>, PortalError> {
+    require_same_site(&headers)?;
+    let session = require_local_configuration_access(peer, &state, &headers)?;
+    if let Some(session) = session.as_ref() {
+        require_request_csrf(&headers, session)?;
+    }
+    input.validated().map_err(PortalError::bad_request)?;
+    state
+        .update_metasys_connection(input)
+        .await
+        .map(Json)
+        .map_err(PortalError::bad_gateway)
 }
 
 async fn bootstrap(
@@ -772,6 +812,28 @@ fn local_bootstrap_request(peer: SocketAddr, headers: &HeaderMap) -> bool {
             .get(header::HOST)
             .and_then(|value| value.to_str().ok())
             .is_some_and(local_host_header)
+}
+
+fn require_local_configuration_access(
+    peer: SocketAddr,
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<Option<PortalSession>, PortalError> {
+    if !local_bootstrap_request(peer, headers) {
+        return Err(PortalError::local_only(anyhow!(
+            "Metasys configuration request rejected from {peer}"
+        )));
+    }
+    if state
+        .store()
+        .portal_user_count()
+        .map_err(PortalError::internal)?
+        == 0
+    {
+        Ok(None)
+    } else {
+        require_admin(state, headers).map(Some)
+    }
 }
 
 fn local_host_header(host: &str) -> bool {
