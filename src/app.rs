@@ -203,7 +203,7 @@ impl AppState {
         let data = replacement_client
             .fetch()
             .await
-            .map_err(|error| anyhow::anyhow!("Metasys connection test failed: {error}"))?;
+            .map_err(metasys_connection_test_failure)?;
         if data.connector == "Demo data" {
             anyhow::bail!("production connection returned demo data");
         }
@@ -420,5 +420,47 @@ impl AppState {
             },
         );
         reading
+    }
+}
+
+fn metasys_connection_test_failure(error: anyhow::Error) -> anyhow::Error {
+    let details = format!("{error:#}");
+    let normalized = details.to_ascii_lowercase();
+    let certificate_failure = ["certificate", "unknown issuer", "unknown ca"]
+        .iter()
+        .any(|needle| normalized.contains(needle));
+
+    if certificate_failure {
+        anyhow::anyhow!(
+            "Metasys connection test failed: TLS certificate validation failed. If this is the expected private Metasys server, select “Trust this server's self-signed certificate” and retry."
+        )
+    } else {
+        anyhow::anyhow!("Metasys connection test failed: {details}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::metasys_connection_test_failure;
+
+    #[test]
+    fn connection_test_failure_explains_self_signed_certificate() {
+        let source = anyhow::anyhow!("invalid peer certificate: UnknownIssuer")
+            .context("connect to legacy Metasys UI login");
+
+        let message = metasys_connection_test_failure(source).to_string();
+
+        assert!(message.contains("TLS certificate validation failed"));
+        assert!(message.contains("Trust this server's self-signed certificate"));
+    }
+
+    #[test]
+    fn connection_test_failure_preserves_non_certificate_cause_chain() {
+        let source =
+            anyhow::anyhow!("connection refused").context("connect to legacy Metasys UI login");
+
+        let message = metasys_connection_test_failure(source).to_string();
+
+        assert!(message.contains("connect to legacy Metasys UI login: connection refused"));
     }
 }
