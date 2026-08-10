@@ -21,6 +21,17 @@ const MAX_POINT_ROWS: usize = 10_000;
 const MAX_SELECTED_POINTS: usize = 8;
 const MAX_TREND_HOURS: i64 = 24 * 365 * 10;
 const LEGACY_HELPER_TIMEOUT_SECONDS: u64 = 40;
+const LEGACY_ZONE_ONLY_FILTER: &str = "p.PointName LIKE '%.ZN-T.#85'";
+const DEFAULT_HVAC_FILTER: &str = r#"(
+        p.PointName LIKE '%.ZN-T.#85'
+        OR p.PointName LIKE '%.SA-T.#85'
+        OR p.PointName LIKE '%.SA-F.#85'
+        OR p.PointName LIKE '%.SF-C.#85'
+        OR p.PointName LIKE '%.SF-S.#85'
+        OR p.PointName LIKE '%.DA-T.#85'
+        OR p.PointName LIKE '%.HWV-O.#85'
+        OR p.PointName LIKE '%.HTG-O.#85'
+    )"#;
 const DEFAULT_QUERY: &str = r#"SELECT
     CAST(recent.point_name AS nvarchar(512)) AS point_name,
     recent.sample_time,
@@ -44,7 +55,16 @@ FROM (
         FROM dbo.tblActualValueDigital
         WHERE PointSliceID = ps.PointSliceID AND UTCDateTime >= @P1 AND UTCDateTime <= @P2
     ) AS valueset
-    WHERE ps.IsRawData = 1 AND p.PointName LIKE '%.ZN-T.#85'
+    WHERE ps.IsRawData = 1 AND (
+        p.PointName LIKE '%.ZN-T.#85'
+        OR p.PointName LIKE '%.SA-T.#85'
+        OR p.PointName LIKE '%.SA-F.#85'
+        OR p.PointName LIKE '%.SF-C.#85'
+        OR p.PointName LIKE '%.SF-S.#85'
+        OR p.PointName LIKE '%.DA-T.#85'
+        OR p.PointName LIKE '%.HWV-O.#85'
+        OR p.PointName LIKE '%.HTG-O.#85'
+    )
     ORDER BY valueset.UTCDateTime DESC
 ) AS recent
 ORDER BY recent.sample_time ASC"#;
@@ -75,6 +95,19 @@ impl Default for SqlTrendSettings {
             legacy_tls: false,
             query: DEFAULT_QUERY.to_owned(),
         }
+    }
+}
+
+impl SqlTrendSettings {
+    pub fn upgrade_legacy_defaults(mut self) -> Self {
+        if self.query.contains(LEGACY_ZONE_ONLY_FILTER)
+            && !self.query.contains("OR p.PointName LIKE")
+        {
+            self.query = self
+                .query
+                .replacen(LEGACY_ZONE_ONLY_FILTER, DEFAULT_HVAC_FILTER, 1);
+        }
+        self
     }
 }
 
@@ -185,6 +218,12 @@ pub struct TrendPoint {
     pub point_slice_id: i32,
     pub point_name: String,
     pub unit: Option<String>,
+    #[serde(default)]
+    pub equipment_name: String,
+    #[serde(default)]
+    pub equipment_path: String,
+    #[serde(default)]
+    pub point_family: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -192,6 +231,86 @@ pub struct TrendPoint {
 pub struct TrendPointCatalog {
     pub points: Vec<TrendPoint>,
     pub truncated: bool,
+}
+
+pub const FEATURED_TREND_POINT_FAMILIES: &[&str] = &[
+    "ZN-T", "SA-T", "SA-F", "SF-C", "SF-S", "DA-T", "HWV-O", "HTG-O", "CLG-O", "ZN-SP", "RA-T",
+    "OA-T", "MA-T", "DMP-O",
+];
+
+fn build_point_catalog(mut points: Vec<TrendPoint>, truncated: bool) -> TrendPointCatalog {
+    for point in &mut points {
+        let (equipment_name, equipment_path, point_family) =
+            trend_point_metadata(&point.point_name);
+        point.equipment_name = equipment_name;
+        point.equipment_path = equipment_path;
+        point.point_family = point_family;
+    }
+    points.sort_by(|left, right| {
+        left.equipment_path
+            .cmp(&right.equipment_path)
+            .then_with(|| left.point_family.cmp(&right.point_family))
+            .then_with(|| left.point_name.cmp(&right.point_name))
+    });
+    TrendPointCatalog { points, truncated }
+}
+
+fn trend_point_metadata(point_name: &str) -> (String, String, String) {
+    let mut reference = point_name.trim();
+    if let Some((prefix, marker)) = reference.rsplit_once('.')
+        && is_attribute_marker(marker)
+    {
+        reference = prefix.trim_end_matches('.');
+    }
+
+    let (equipment_path, family) = reference.rsplit_once('.').map_or_else(
+        || {
+            let uppercase = reference.to_ascii_uppercase();
+            FEATURED_TREND_POINT_FAMILIES
+                .iter()
+                .find_map(|family| {
+                    let marker = format!(".{family}");
+                    uppercase
+                        .rfind(&marker)
+                        .map(|index| (&reference[..index], *family))
+                })
+                .unwrap_or((reference, ""))
+        },
+        |(equipment, family)| (equipment, family),
+    );
+    let equipment_path = equipment_path
+        .trim()
+        .trim_end_matches(['.', '/', ':'])
+        .to_owned();
+    let equipment_name = equipment_path
+        .rsplit(['/', '.'])
+        .find(|part| !part.trim().is_empty())
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .unwrap_or("Unassigned equipment")
+        .to_owned();
+    let point_family = normalize_point_family(family);
+    (equipment_name, equipment_path, point_family)
+}
+
+fn is_attribute_marker(value: &str) -> bool {
+    value.strip_prefix('#').is_some_and(|digits| {
+        !digits.is_empty() && digits.chars().all(|character| character.is_ascii_digit())
+    })
+}
+
+fn normalize_point_family(value: &str) -> String {
+    let normalized = value.trim().replace(['_', ' '], "-").to_ascii_uppercase();
+    if normalized.is_empty()
+        || normalized.len() > 32
+        || !normalized
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-')
+    {
+        String::new()
+    } else {
+        normalized
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -349,7 +468,7 @@ pub async fn fetch_trend_points(settings: &SqlTrendSettings) -> Result<TrendPoin
         .await?
         {
             LegacyResponse::Points { points, truncated } => {
-                Ok(TrendPointCatalog { points, truncated })
+                Ok(build_point_catalog(points, truncated))
             }
             _ => bail!("legacy SQL helper returned an unexpected point-catalog response"),
         };
@@ -384,9 +503,12 @@ pub async fn fetch_trend_points(settings: &SqlTrendSettings) -> Result<TrendPoin
                 .try_get::<&str, _>("unit")?
                 .map(str::to_owned)
                 .filter(|value| !value.trim().is_empty()),
+            equipment_name: String::new(),
+            equipment_path: String::new(),
+            point_family: String::new(),
         });
     }
-    Ok(TrendPointCatalog { points, truncated })
+    Ok(build_point_catalog(points, truncated))
 }
 
 pub async fn fetch_trends(
@@ -910,7 +1032,8 @@ fn validate_read_only_query(query: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        SampleRow, SqlTrendSettings, group_rows, selected_point_query, validate_point_slice_ids,
+        DEFAULT_HVAC_FILTER, LEGACY_ZONE_ONLY_FILTER, SampleRow, SqlTrendSettings, group_rows,
+        selected_point_query, trend_point_metadata, validate_point_slice_ids,
         validate_read_only_query, validate_trend_window,
     };
     use chrono::{Duration, TimeZone, Utc};
@@ -960,6 +1083,44 @@ mod tests {
         assert!(validate_point_slice_ids(&[1, 1]).is_err());
         assert!(validate_point_slice_ids(&[0]).is_err());
         assert!(validate_point_slice_ids(&[1, 2, 3, 4, 5, 6, 7, 8, 9]).is_err());
+    }
+
+    #[test]
+    fn classifies_terminal_box_and_air_handler_point_names() {
+        assert_eq!(
+            trend_point_metadata("G2-NAE:G2-NAE/FC-1.TB6-P06.ZN-T.#85"),
+            (
+                "TB6-P06".to_owned(),
+                "G2-NAE:G2-NAE/FC-1.TB6-P06".to_owned(),
+                "ZN-T".to_owned(),
+            )
+        );
+        assert_eq!(
+            trend_point_metadata("BMSServer:CentralPlant/FC-1.AHU-1.SA-F.#85"),
+            (
+                "AHU-1".to_owned(),
+                "BMSServer:CentralPlant/FC-1.AHU-1".to_owned(),
+                "SA-F".to_owned(),
+            )
+        );
+        assert_eq!(
+            trend_point_metadata("SERVER:DEVICE/FAV-201.HWV_O"),
+            (
+                "FAV-201".to_owned(),
+                "SERVER:DEVICE/FAV-201".to_owned(),
+                "HWV-O".to_owned(),
+            )
+        );
+
+        for family in [
+            "ZN-T", "SA-T", "SA-F", "SF-C", "SF-S", "DA-T", "HWV-O", "HTG-O",
+        ] {
+            let reference = format!("BMSServer:A2-NAE/FC-1.TB1-301.{family}.#85");
+            let (equipment, path, discovered_family) = trend_point_metadata(&reference);
+            assert_eq!(equipment, "TB1-301");
+            assert_eq!(path, "BMSServer:A2-NAE/FC-1.TB1-301");
+            assert_eq!(discovered_family, family);
+        }
     }
 
     #[test]
@@ -1022,5 +1183,23 @@ mod tests {
         });
         let settings: SqlTrendSettings = serde_json::from_value(value).unwrap();
         assert!(!settings.legacy_tls);
+    }
+
+    #[test]
+    fn upgrades_the_zone_only_built_in_query_to_featured_hvac_families() {
+        let settings = SqlTrendSettings {
+            query: format!(
+                "SELECT * FROM samples WHERE sample_time >= @P1 AND sample_time <= @P2 AND {LEGACY_ZONE_ONLY_FILTER}"
+            ),
+            ..Default::default()
+        }
+        .upgrade_legacy_defaults();
+        assert!(settings.query.contains(DEFAULT_HVAC_FILTER));
+        for family in [
+            "ZN-T", "SA-T", "SA-F", "SF-C", "SF-S", "DA-T", "HWV-O", "HTG-O",
+        ] {
+            assert!(settings.query.contains(family));
+        }
+        validate_read_only_query(&settings.query).unwrap();
     }
 }

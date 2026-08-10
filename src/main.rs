@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -8,7 +8,8 @@ use metasys_dashboard::{
     metasys::MetasysClient,
     portal::{auth::hash_password, models::PortalRole},
     sql_trends::{
-        SqlTrendSettings, fetch_trend_points, fetch_trends, set_sql_password, test_connection,
+        FEATURED_TREND_POINT_FAMILIES, SqlTrendSettings, fetch_trend_points, fetch_trends,
+        set_sql_password, test_connection,
     },
     store::Store,
     web,
@@ -142,23 +143,124 @@ async fn check_sql(config: Config) -> Result<()> {
 
     test_connection(&settings).await?;
     let catalog = fetch_trend_points(&settings).await?;
-    let probe = catalog
-        .points
+    let mut probes = FEATURED_TREND_POINT_FAMILIES
         .iter()
-        .find(|point| point.point_name.to_ascii_uppercase().contains("ZN-T"))
-        .or_else(|| catalog.points.first())
-        .context("SQL historian point catalog is empty")?;
-    let trends = fetch_trends(&settings, 24 * 365 * 5, &[probe.point_slice_id]).await?;
+        .filter_map(|family| {
+            catalog
+                .points
+                .iter()
+                .find(|point| {
+                    point.point_family == *family
+                        && point.equipment_name.to_ascii_uppercase().starts_with("TB")
+                })
+                .or_else(|| {
+                    catalog
+                        .points
+                        .iter()
+                        .find(|point| point.point_family == *family)
+                })
+                .map(|point| (*family, point))
+        })
+        .take(8)
+        .collect::<Vec<_>>();
+    if probes.is_empty() {
+        probes.push((
+            "UNCLASSIFIED",
+            catalog
+                .points
+                .first()
+                .context("SQL historian point catalog is empty")?,
+        ));
+    }
+    let point_slice_ids = probes
+        .iter()
+        .map(|(_, point)| point.point_slice_id)
+        .collect::<Vec<_>>();
+    let trends = fetch_trends(&settings, 24 * 365 * 5, &point_slice_ids).await?;
     println!(
-        "SQL trend check OK: {} catalog points | {} samples from one read-only probe{}",
+        "SQL trend check OK: {} catalog points | {} samples from {} read-only five-year probes{}",
         catalog.points.len(),
         trends.sample_count,
+        probes.len(),
         if catalog.truncated {
             " | catalog truncated"
         } else {
             ""
         }
     );
+    for family in FEATURED_TREND_POINT_FAMILIES {
+        let matching = catalog
+            .points
+            .iter()
+            .filter(|point| point.point_family == *family)
+            .collect::<Vec<_>>();
+        let equipment = matching
+            .iter()
+            .map(|point| point.equipment_path.as_str())
+            .collect::<BTreeSet<_>>()
+            .len();
+        let terminal_boxes = matching
+            .iter()
+            .filter(|point| point.equipment_name.to_ascii_uppercase().starts_with("TB"))
+            .count();
+        if let Some((_, probe)) = probes
+            .iter()
+            .find(|(probe_family, _)| probe_family == family)
+        {
+            let series = trends
+                .series
+                .iter()
+                .find(|series| series.name == probe.point_name);
+            let samples = series.map_or(0, |series| series.samples.len());
+            let span = series
+                .and_then(|series| Some((series.samples.first()?, series.samples.last()?)))
+                .map_or_else(
+                    || "no samples returned".to_owned(),
+                    |(first, last)| {
+                        format!(
+                            "{} to {}",
+                            first.timestamp.date_naive(),
+                            last.timestamp.date_naive()
+                        )
+                    },
+                );
+            println!(
+                "  {family}: {} points across {equipment} equipment ({terminal_boxes} terminal boxes) | probe {} | {samples} samples ({span})",
+                matching.len(),
+                probe.point_name,
+            );
+        } else {
+            println!(
+                "  {family}: {} points across {equipment} equipment ({terminal_boxes} terminal boxes)",
+                matching.len()
+            );
+        }
+    }
+    for marker in ["TB", "FAV", "VAV", "WSHP"] {
+        let matching = catalog
+            .points
+            .iter()
+            .filter(|point| {
+                let equipment = point.equipment_name.to_ascii_uppercase();
+                equipment.starts_with(marker) || equipment.contains(&format!("-{marker}"))
+            })
+            .collect::<Vec<_>>();
+        let examples = matching
+            .iter()
+            .take(4)
+            .map(|point| point.point_name.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        println!(
+            "  {marker} equipment references: {}{}",
+            matching.len(),
+            if examples.is_empty() {
+                String::new()
+            } else {
+                format!(" | {examples}")
+            }
+        );
+    }
     Ok(())
 }
 

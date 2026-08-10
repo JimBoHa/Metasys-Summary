@@ -311,10 +311,11 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
-        value
+        let settings: SqlTrendSettings = value
             .map(|value| serde_json::from_str(&value).context("decode SQL trend settings"))
             .transpose()
-            .map(Option::unwrap_or_default)
+            .map(Option::unwrap_or_default)?;
+        Ok(settings.upgrade_legacy_defaults())
     }
 
     pub fn save_sql_trend_settings(&self, settings: &SqlTrendSettings) -> Result<()> {
