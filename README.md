@@ -35,7 +35,7 @@ cargo run -- check
 cargo run
 ```
 
-Open `http://127.0.0.1:3030` for the maintenance portal. Administrators and operators can open the alarm dashboard at `http://127.0.0.1:3030/operations`. To allow other local-network devices, set `bind_address = "0.0.0.0"`; then open `http://<this-mac-ip>:3030` after macOS Firewall allows incoming connections.
+Open `http://127.0.0.1:3030` for the maintenance portal. Administrators and operators can open the alarm dashboard at `/operations` and the historian analysis workspace at `/trends`. To allow other local-network devices, set `bind_address = "0.0.0.0"`; then open `http://<this-mac-ip>:3030` after macOS Firewall allows incoming connections.
 
 To preview the complete dashboard without Metasys:
 
@@ -76,7 +76,7 @@ Optional login-time background service:
 - Fourteen-day daily alarm chart with a seven-day rolling mean
 - Alarm-type and equipment-share donut charts
 - Configurable encrypted email reports with manual, daily, weekday, or weekly delivery
-- Optional Microsoft SQL Server historian browser and trend chart with selectable 24-hour to 5-year ranges
+- Optional Microsoft SQL Server historian workspace with point search, custom ranges, safe aggregation, zoom, statistics, normalization, smoothing, data table, and CSV export
 
 Modern Metasys REST versions v2-v6 are auto-detected. REST v5/v6 uses activities; v2-v4 uses alarm collections with version-appropriate filters. The legacy connector uses Alarm Manager for events and Potential Problem Areas for overrides. SQLite deduplicates event IDs across polls, so the local 30-day index improves continuously even when an older Metasys endpoint returns a limited initial history.
 
@@ -98,7 +98,7 @@ Passwords stay in macOS Keychain. Only encrypted SMTP transports are supported: 
 
 Open **SQL Trends** from a browser on the host Mac. Configure the SQL Server hostname or IP, port, database, read-only username, password, certificate policy, and optional legacy-TLS compatibility. The password is stored only in macOS Keychain; non-secret settings are stored in the dashboard SQLite database. Settings endpoints reject non-loopback clients.
 
-Operators can load the Metasys historian point catalog, search by equipment or point name, select up to eight points, and graph up to 5,000 samples over a 24-hour to 5-year window. Current Metasys historian tables are queried directly with bounded, parameterized `SELECT` statements. No remote database content is modified or copied locally.
+Operators can open `/trends`, load the Metasys historian point catalog, search by equipment or point name, select up to eight points, and graph up to 5,000 samples over preset or custom windows as long as 10 years. The server reports the actual mean-aggregation interval it used. Current Metasys historian tables are queried directly with bounded, parameterized `SELECT` statements. No remote database content is modified or copied locally.
 
 The mapping query must be one read-only `SELECT` or `WITH` statement, use `@P1` and `@P2` for UTC start/end bounds, and return these aliases:
 

@@ -7,6 +7,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use serde_json::json;
 use tower_http::trace::TraceLayer;
@@ -24,14 +25,20 @@ use crate::{
 const INDEX_HTML: &str = include_str!("../static/index.html");
 const APP_JS: &str = include_str!("../static/app.js");
 const STYLES_CSS: &str = include_str!("../static/styles.css");
+const TRENDS_HTML: &str = include_str!("../static/trends.html");
+const TRENDS_JS: &str = include_str!("../static/trends.js");
+const TRENDS_CSS: &str = include_str!("../static/trends.css");
 
 type WebResult<T> = Result<T, PortalError>;
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/operations", get(index))
+        .route("/trends", get(trends_index))
         .route("/app.js", get(javascript))
         .route("/styles.css", get(stylesheet))
+        .route("/trends.js", get(trends_javascript))
+        .route("/trends.css", get(trends_stylesheet))
         .route("/api/dashboard", get(dashboard))
         .route("/api/health", get(health))
         .route("/api/refresh", post(refresh))
@@ -60,12 +67,28 @@ async fn index(State(state): State<Arc<AppState>>, headers: HeaderMap) -> WebRes
     Ok(static_response(INDEX_HTML, "text/html; charset=utf-8"))
 }
 
+async fn trends_index(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> WebResult<Response> {
+    require_role(&state, &headers, &[PortalRole::Admin, PortalRole::Operator])?;
+    Ok(static_response(TRENDS_HTML, "text/html; charset=utf-8"))
+}
+
 async fn javascript() -> Response {
     static_response(APP_JS, "text/javascript; charset=utf-8")
 }
 
 async fn stylesheet() -> Response {
     static_response(STYLES_CSS, "text/css; charset=utf-8")
+}
+
+async fn trends_javascript() -> Response {
+    static_response(TRENDS_JS, "text/javascript; charset=utf-8")
+}
+
+async fn trends_stylesheet() -> Response {
+    static_response(TRENDS_CSS, "text/css; charset=utf-8")
 }
 
 async fn dashboard(
@@ -207,6 +230,10 @@ async fn test_sql_settings(
 #[derive(Deserialize)]
 struct TrendQuery {
     hours: Option<i64>,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+    #[serde(rename = "intervalSeconds")]
+    interval_seconds: Option<i64>,
     #[serde(default, rename = "pointSlices")]
     point_slices: Option<String>,
 }
@@ -230,11 +257,51 @@ async fn trends(
 ) -> WebResult<Json<crate::sql_trends::TrendResponse>> {
     require_role(&state, &headers, &[PortalRole::Admin, PortalRole::Operator])?;
     let point_slice_ids = parse_point_slice_ids(query.point_slices.as_deref())?;
+    let (from, to, interval_seconds) = resolve_trend_window(&query)?;
     state
-        .sql_trends(query.hours.unwrap_or(24 * 7), &point_slice_ids)
+        .sql_trends(from, to, interval_seconds, &point_slice_ids)
         .await
         .map(Json)
         .map_err(PortalError::bad_gateway)
+}
+
+fn resolve_trend_window(
+    query: &TrendQuery,
+) -> WebResult<(DateTime<Utc>, DateTime<Utc>, Option<i64>)> {
+    if query.from.is_some() != query.to.is_some() {
+        return Err(PortalError::bad_request(anyhow::anyhow!(
+            "trend start and end must be supplied together"
+        )));
+    }
+    if query.hours.is_some() && query.from.is_some() {
+        return Err(PortalError::bad_request(anyhow::anyhow!(
+            "use either a preset hour range or a custom start and end"
+        )));
+    }
+    if query.interval_seconds.is_some_and(|seconds| seconds < 1) {
+        return Err(PortalError::bad_request(anyhow::anyhow!(
+            "trend interval must be a positive number of seconds"
+        )));
+    }
+    let (from, to) = if let (Some(from), Some(to)) = (query.from, query.to) {
+        (from, to)
+    } else {
+        let hours = query.hours.unwrap_or(24 * 7);
+        if !(1..=24 * 365 * 10).contains(&hours) {
+            return Err(PortalError::bad_request(anyhow::anyhow!(
+                "trend hour range must be between 1 hour and 10 years"
+            )));
+        }
+        let to = Utc::now();
+        (to - Duration::hours(hours), to)
+    };
+    let range_seconds = (to - from).num_seconds();
+    if !(1..=24 * 365 * 10 * 60 * 60).contains(&range_seconds) {
+        return Err(PortalError::bad_request(anyhow::anyhow!(
+            "trend start must precede the end and the range cannot exceed 10 years"
+        )));
+    }
+    Ok((from, to, query.interval_seconds))
 }
 
 fn parse_point_slice_ids(value: Option<&str>) -> WebResult<Vec<i32>> {
@@ -331,7 +398,7 @@ mod tests {
     use tempfile::tempdir;
     use tower::ServiceExt;
 
-    use super::router;
+    use super::{TrendQuery, resolve_trend_window, router};
     use crate::{
         app::AppState,
         config::{Config, ConnectorPreference},
@@ -401,6 +468,52 @@ mod tests {
     async fn json_body(response: Response) -> Value {
         let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[test]
+    fn trend_query_validates_custom_windows_and_intervals() {
+        let from = chrono::Utc::now() - chrono::Duration::days(2);
+        let to = chrono::Utc::now();
+        let resolved = resolve_trend_window(&TrendQuery {
+            hours: None,
+            from: Some(from),
+            to: Some(to),
+            interval_seconds: Some(300),
+            point_slices: Some("1,2".to_owned()),
+        })
+        .ok()
+        .unwrap();
+        assert_eq!(resolved, (from, to, Some(300)));
+        assert!(
+            resolve_trend_window(&TrendQuery {
+                hours: Some(24),
+                from: Some(from),
+                to: Some(to),
+                interval_seconds: None,
+                point_slices: None,
+            })
+            .is_err()
+        );
+        assert!(
+            resolve_trend_window(&TrendQuery {
+                hours: None,
+                from: Some(from),
+                to: None,
+                interval_seconds: None,
+                point_slices: None,
+            })
+            .is_err()
+        );
+        assert!(
+            resolve_trend_window(&TrendQuery {
+                hours: Some(24),
+                from: None,
+                to: None,
+                interval_seconds: Some(0),
+                point_slices: None,
+            })
+            .is_err()
+        );
     }
 
     async fn login(app: &Router, email: &str) -> Login {
@@ -790,6 +903,12 @@ mod tests {
             .status(),
             StatusCode::FORBIDDEN
         );
+        assert_eq!(
+            call(&app, request(Method::GET, "/trends", None, Some(&viewer)),)
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
         let report_body = json!({
             "regionId": region_a,
             "contactEmail": "occupant@example.test",
@@ -890,6 +1009,12 @@ mod tests {
             )
             .await
             .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(&app, request(Method::GET, "/trends", None, Some(&operator)),)
+                .await
+                .status(),
             StatusCode::OK
         );
     }
