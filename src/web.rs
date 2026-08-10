@@ -28,6 +28,8 @@ const STYLES_CSS: &str = include_str!("../static/styles.css");
 const TRENDS_HTML: &str = include_str!("../static/trends.html");
 const TRENDS_JS: &str = include_str!("../static/trends.js");
 const TRENDS_CSS: &str = include_str!("../static/trends.css");
+const NAVIGATION_JS: &str = include_str!("../static/navigation.js");
+const NAVIGATION_CSS: &str = include_str!("../static/navigation.css");
 
 type WebResult<T> = Result<T, PortalError>;
 
@@ -39,6 +41,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/styles.css", get(stylesheet))
         .route("/trends.js", get(trends_javascript))
         .route("/trends.css", get(trends_stylesheet))
+        .route("/navigation.js", get(navigation_javascript))
+        .route("/navigation.css", get(navigation_stylesheet))
         .route("/api/dashboard", get(dashboard))
         .route("/api/health", get(health))
         .route("/api/refresh", post(refresh))
@@ -89,6 +93,14 @@ async fn trends_javascript() -> Response {
 
 async fn trends_stylesheet() -> Response {
     static_response(TRENDS_CSS, "text/css; charset=utf-8")
+}
+
+async fn navigation_javascript() -> Response {
+    static_response(NAVIGATION_JS, "text/javascript; charset=utf-8")
+}
+
+async fn navigation_stylesheet() -> Response {
+    static_response(NAVIGATION_CSS, "text/css; charset=utf-8")
 }
 
 async fn dashboard(
