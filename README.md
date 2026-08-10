@@ -139,11 +139,19 @@ Metasys repository schemas vary. The advanced query remains available for compat
 
 ## Verify
 
+Run the complete pull-request gate locally with one command:
+
 ```bash
-cargo fmt -- --check
-cargo test --all-targets
-cargo clippy --all-targets -- -D warnings
-cargo build --release
+./scripts/verify.sh
 ```
+
+It checks repository hygiene, browser contracts, JavaScript syntax, formatting,
+all tests and strict Clippy for both Rust crates, then starts an isolated demo
+server for an authenticated HTTP/CSRF/security-header smoke test. The smoke test
+uses a temporary SQLite database and never reads production credentials or data.
+
+See [Testing and debugging strategy](docs/testing-strategy.md) for the risk
+matrix, required feature-PR coverage, phased browser/integration/release tests,
+fixture rules, and failure-artifact policy.
 
 Metasys references: [official REST API v4](https://jci-metasys.github.io/api-landing/api/v4), [API version support matrix](https://jci-metasys.github.io/api-landing/guides/version-support-matrix/), and [creating an API user](https://docs.johnsoncontrols.com/bas/r/Metasys/en-US/Security-Administrator-System-Technical-Bulletin/13.0/Detailed-procedures-for-the-Metasys-UI/Creating-a-user-who-can-access-the-Metasys-REST-API).

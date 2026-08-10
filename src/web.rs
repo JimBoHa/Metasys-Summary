@@ -528,6 +528,74 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn public_assets_have_security_headers_and_protected_pages_require_login() {
+        let directory = tempdir().unwrap();
+        let database_path = directory.path().join("headers.sqlite3");
+        let store = Arc::new(Store::open(&database_path).unwrap());
+        let state = Arc::new(AppState::new(Arc::new(test_config(&database_path)), store).unwrap());
+        let app = router(state);
+
+        for path in [
+            "/",
+            "/portal.js",
+            "/portal.css",
+            "/navigation.js",
+            "/navigation.css",
+        ] {
+            let response = call(&app, request(Method::GET, path, None, None)).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "unexpected status for {path}"
+            );
+            let headers = response.headers();
+            assert!(
+                headers
+                    .get(header::CONTENT_TYPE)
+                    .is_some_and(|value| !value.as_bytes().is_empty()),
+                "missing content type for {path}"
+            );
+            assert_eq!(
+                headers.get(header::X_CONTENT_TYPE_OPTIONS),
+                Some(&HeaderValue::from_static("nosniff")),
+                "missing nosniff for {path}"
+            );
+            assert_eq!(
+                headers.get("x-frame-options"),
+                Some(&HeaderValue::from_static("DENY")),
+                "missing frame denial for {path}"
+            );
+            assert!(
+                headers
+                    .get("content-security-policy")
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| {
+                        value.contains("default-src 'self'")
+                            && value.contains("object-src 'none'")
+                            && value.contains("frame-ancestors 'none'")
+                    }),
+                "missing hardened CSP for {path}"
+            );
+            assert!(
+                headers
+                    .get(header::CACHE_CONTROL)
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| value.contains("no-store")),
+                "missing no-store for {path}"
+            );
+        }
+
+        for path in ["/operations", "/trends", "/api/dashboard", "/api/trends"] {
+            let response = call(&app, request(Method::GET, path, None, None)).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "protected route was exposed at {path}"
+            );
+        }
+    }
+
     async fn login(app: &Router, email: &str) -> Login {
         let response = call(
             app,
