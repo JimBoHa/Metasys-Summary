@@ -4,6 +4,9 @@ const numberFormat = new Intl.NumberFormat();
 const palette = ["#2cc7d2", "#53d18b", "#f2b84b", "#f1894c", "#9a8cff", "#ef6f98", "#65a7e8", "#627984"];
 let dashboardData = null;
 let sqlTrendData = null;
+let sqlTrendPoints = [];
+let sqlTrendPointsTruncated = false;
+const selectedTrendPointIds = new Set();
 let refreshTimer = null;
 let reportRecipients = [];
 let csrfToken = "";
@@ -43,6 +46,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("sql-settings-close").addEventListener("click", () => $("sql-settings-dialog").close());
   $("sql-settings-form").addEventListener("submit", saveSqlSettings);
   $("sql-test-button").addEventListener("click", testSqlConnection);
+  $("load-trend-points-button").addEventListener("click", loadTrendPoints);
+  $("trend-point-search").addEventListener("input", renderTrendPointOptions);
+  $("trend-point-select").addEventListener("change", updateTrendPointSelection);
   $("load-trends-button").addEventListener("click", loadSqlTrends);
   $("trend-range").addEventListener("change", () => {
     if (sqlTrendData) loadSqlTrends();
@@ -465,6 +471,7 @@ async function openSqlSettings() {
     $("sql-database").value = settings.database;
     $("sql-username").value = settings.username;
     $("sql-trust-certificate").checked = settings.trustServerCertificate;
+    $("sql-legacy-tls").checked = settings.legacyTls;
     $("sql-query").value = settings.query;
     $("sql-password").value = "";
     $("sql-clear-password").checked = false;
@@ -490,6 +497,7 @@ async function saveSqlSettings(event) {
     password: password || null,
     clearPassword: $("sql-clear-password").checked,
     trustServerCertificate: $("sql-trust-certificate").checked,
+    legacyTls: $("sql-legacy-tls").checked,
     query: $("sql-query").value
   };
   try {
@@ -503,7 +511,10 @@ async function saveSqlSettings(event) {
     $("sql-password").value = "";
     $("sql-clear-password").checked = false;
     setText("sql-password-state", settings.passwordConfigured ? "Password saved in macOS Keychain" : "No password saved");
-    showFormMessage("Settings saved. Test connection before loading trends.");
+    sqlTrendPoints = [];
+    selectedTrendPointIds.clear();
+    renderTrendPointOptions();
+    showFormMessage("Settings saved. Test the connection, then browse historian points.");
     setTrendMessage(settings.enabled ? "SQL trend source configured. Load trends when ready." : "SQL trend source is disabled.");
   } catch (error) {
     showFormMessage(error.message || "Unable to save SQL settings", true);
@@ -527,13 +538,83 @@ async function testSqlConnection() {
   }
 }
 
+async function loadTrendPoints() {
+  const button = $("load-trend-points-button");
+  button.disabled = true;
+  setTrendMessage("Loading historian point catalog…");
+  try {
+    const response = await portalFetch("/api/trend-points", { cache: "no-store" });
+    if (!response.ok) throw new Error(await apiError(response));
+    const catalog = await response.json();
+    sqlTrendPoints = catalog.points || [];
+    sqlTrendPointsTruncated = Boolean(catalog.truncated);
+    selectedTrendPointIds.clear();
+    renderTrendPointOptions();
+    const suffix = sqlTrendPointsTruncated ? " (catalog limit reached)" : "";
+    setTrendMessage(`${numberFormat.format(sqlTrendPoints.length)} historian points available${suffix}. Search and select up to eight.`);
+  } catch (error) {
+    sqlTrendPoints = [];
+    selectedTrendPointIds.clear();
+    renderTrendPointOptions();
+    setTrendMessage(error.message || "Unable to load historian points", true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function renderTrendPointOptions() {
+  const select = $("trend-point-select");
+  const search = $("trend-point-search").value.trim().toLocaleLowerCase();
+  const matches = sqlTrendPoints
+    .filter((point) => !search || `${point.pointName} ${point.unit || ""}`.toLocaleLowerCase().includes(search))
+    .slice(0, 500);
+  select.replaceChildren();
+  matches.forEach((point) => {
+    const option = document.createElement("option");
+    option.value = String(point.pointSliceId);
+    option.textContent = `${point.pointName}${point.unit ? ` · ${point.unit}` : ""}`;
+    option.selected = selectedTrendPointIds.has(point.pointSliceId);
+    select.append(option);
+  });
+  select.disabled = !sqlTrendPoints.length;
+  updateTrendPointSelectionText(matches.length);
+}
+
+function updateTrendPointSelection() {
+  const visibleIds = [...$("trend-point-select").options].map((option) => Number(option.value));
+  visibleIds.forEach((id) => selectedTrendPointIds.delete(id));
+  [...$("trend-point-select").selectedOptions].forEach((option) => selectedTrendPointIds.add(Number(option.value)));
+  if (selectedTrendPointIds.size > 8) {
+    const retained = [...selectedTrendPointIds].slice(0, 8);
+    selectedTrendPointIds.clear();
+    retained.forEach((id) => selectedTrendPointIds.add(id));
+    [...$("trend-point-select").options].forEach((option) => {
+      option.selected = selectedTrendPointIds.has(Number(option.value));
+    });
+    setTrendMessage("Select no more than eight historian points.", true);
+  }
+  updateTrendPointSelectionText($("trend-point-select").options.length);
+}
+
+function updateTrendPointSelectionText(visibleCount) {
+  const selected = selectedTrendPointIds.size;
+  const detail = sqlTrendPoints.length
+    ? ` Showing ${numberFormat.format(visibleCount)} of ${numberFormat.format(sqlTrendPoints.length)} loaded points.`
+    : "";
+  setText("trend-point-selection", selected
+    ? `${selected} point${selected === 1 ? "" : "s"} selected.${detail}`
+    : `Select up to eight points. With no selection, the configured advanced query is used.${detail}`);
+}
+
 async function loadSqlTrends() {
   const button = $("load-trends-button");
   button.disabled = true;
   setTrendMessage("Loading SQL trend samples…");
   try {
     const hours = Number($("trend-range").value);
-    const response = await portalFetch(`/api/trends?hours=${encodeURIComponent(hours)}`, { cache: "no-store" });
+    const parameters = new URLSearchParams({ hours: String(hours) });
+    if (selectedTrendPointIds.size) parameters.set("pointSlices", [...selectedTrendPointIds].join(","));
+    const response = await portalFetch(`/api/trends?${parameters}`, { cache: "no-store" });
     if (!response.ok) throw new Error(await apiError(response));
     sqlTrendData = await response.json();
     drawSqlTrendChart();

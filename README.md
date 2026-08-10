@@ -76,17 +76,17 @@ Optional login-time background service:
 - Fourteen-day daily alarm chart with a seven-day rolling mean
 - Alarm-type and equipment-share donut charts
 - Configurable encrypted email reports with manual, daily, weekday, or weekly delivery
-- Optional Microsoft SQL Server trend chart with selectable 24-hour to 30-day ranges
+- Optional Microsoft SQL Server historian browser and trend chart with selectable 24-hour to 5-year ranges
 
 Modern Metasys REST versions v2-v6 are auto-detected. REST v5/v6 uses activities; v2-v4 uses alarm collections with version-appropriate filters. The legacy connector uses Alarm Manager for events and Potential Problem Areas for overrides. SQLite deduplicates event IDs across polls, so the local 30-day index improves continuously even when an older Metasys endpoint returns a limited initial history.
 
 ## Maintenance portal
 
-Administrators create buildings and floors, upload a building-overview PDF and floor PDFs, review the locally generated clean traces, draw named service regions, map each region to its FAV/temperature point, and assign user access. Reporting staff can view assigned spaces and submit requests; view-only staff cannot submit; operators can see all spaces and update requests; administrators have full control.
+Administrators create buildings and floors, upload a building-overview PDF and floor PDFs as backgrounds, draw named service regions, map each region to its FAV/temperature point, and assign user access. Reporting staff can view assigned spaces and submit requests; view-only staff cannot submit; operators can see all spaces and update requests; administrators have full control.
 
 Administrators working from the host Mac can update and test the live Metasys connection under **Administration → Metasys connection**. A successful save activates the new client immediately without restarting the service.
 
-PDFs are processed locally on macOS and are not sent to an external service. The automatic trace is a starting point and must be reviewed by an administrator. See [maintenance portal setup](docs/maintenance-portal.md).
+PDFs are processed locally on macOS and are not sent to an external service. See [maintenance portal setup](docs/maintenance-portal.md).
 
 ## Email reports
 
@@ -96,7 +96,9 @@ Passwords stay in macOS Keychain. Only encrypted SMTP transports are supported: 
 
 ## SQL trend source
 
-Open **SQL Trends** from a browser on the host Mac. Configure the SQL Server hostname or IP, port, database, read-only username, password, certificate policy, and mapping query. The password is stored only in macOS Keychain; non-secret settings are stored in the dashboard SQLite database. Settings endpoints reject non-loopback clients.
+Open **SQL Trends** from a browser on the host Mac. Configure the SQL Server hostname or IP, port, database, read-only username, password, certificate policy, and optional legacy-TLS compatibility. The password is stored only in macOS Keychain; non-secret settings are stored in the dashboard SQLite database. Settings endpoints reject non-loopback clients.
+
+Operators can load the Metasys historian point catalog, search by equipment or point name, select up to eight points, and graph up to 5,000 samples over a 24-hour to 5-year window. Current Metasys historian tables are queried directly with bounded, parameterized `SELECT` statements. No remote database content is modified or copied locally.
 
 The mapping query must be one read-only `SELECT` or `WITH` statement, use `@P1` and `@P2` for UTC start/end bounds, and return these aliases:
 
@@ -105,7 +107,7 @@ The mapping query must be one read-only `SELECT` or `WITH` statement, use `@P1` 
 - `sample_value` as a numeric value
 - `unit` as text or `NULL`
 
-Metasys repository schemas vary. A stable read-only compatibility view is recommended. See [SQL trend setup](docs/sql-trends.md).
+Metasys repository schemas vary. The advanced query remains available for compatibility views and site-specific reporting. See [SQL trend setup](docs/sql-trends.md).
 
 ## Environment overrides
 

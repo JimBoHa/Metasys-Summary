@@ -46,6 +46,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(sql_settings).put(update_sql_settings),
         )
         .route("/api/settings/sql/test", post(test_sql_settings))
+        .route("/api/trend-points", get(trend_points))
         .route("/api/trends", get(trends))
         .merge(crate::portal::web::routes())
         .fallback(not_found)
@@ -206,6 +207,20 @@ async fn test_sql_settings(
 #[derive(Deserialize)]
 struct TrendQuery {
     hours: Option<i64>,
+    #[serde(default, rename = "pointSlices")]
+    point_slices: Option<String>,
+}
+
+async fn trend_points(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> WebResult<Json<crate::sql_trends::TrendPointCatalog>> {
+    require_role(&state, &headers, &[PortalRole::Admin, PortalRole::Operator])?;
+    state
+        .sql_trend_points()
+        .await
+        .map(Json)
+        .map_err(PortalError::bad_gateway)
 }
 
 async fn trends(
@@ -214,11 +229,28 @@ async fn trends(
     Query(query): Query<TrendQuery>,
 ) -> WebResult<Json<crate::sql_trends::TrendResponse>> {
     require_role(&state, &headers, &[PortalRole::Admin, PortalRole::Operator])?;
+    let point_slice_ids = parse_point_slice_ids(query.point_slices.as_deref())?;
     state
-        .sql_trends(query.hours.unwrap_or(24 * 7))
+        .sql_trends(query.hours.unwrap_or(24 * 7), &point_slice_ids)
         .await
         .map(Json)
         .map_err(PortalError::bad_gateway)
+}
+
+fn parse_point_slice_ids(value: Option<&str>) -> WebResult<Vec<i32>> {
+    let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+        return Ok(Vec::new());
+    };
+    value
+        .split(',')
+        .map(|part| {
+            part.trim().parse::<i32>().map_err(|_| {
+                PortalError::bad_request(anyhow::anyhow!(
+                    "historian point selections must be numeric identifiers"
+                ))
+            })
+        })
+        .collect()
 }
 
 fn require_role(

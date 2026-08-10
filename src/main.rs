@@ -7,6 +7,9 @@ use metasys_dashboard::{
     config::{Config, ConnectorPreference, load_password, store_password},
     metasys::MetasysClient,
     portal::{auth::hash_password, models::PortalRole},
+    sql_trends::{
+        SqlTrendSettings, fetch_trend_points, fetch_trends, set_sql_password, test_connection,
+    },
     store::Store,
     web,
 };
@@ -50,6 +53,23 @@ enum Command {
         #[arg(long)]
         name: String,
     },
+    /// Store a read-only SQL trend connection and password locally.
+    ConfigureSql {
+        #[arg(long)]
+        host: String,
+        #[arg(long, default_value = "1433")]
+        port: u16,
+        #[arg(long)]
+        database: String,
+        #[arg(long)]
+        username: String,
+        #[arg(long)]
+        trust_server_certificate: bool,
+        #[arg(long)]
+        legacy_tls: bool,
+    },
+    /// Verify the saved SQL connection, point catalog, and one read-only trend query.
+    CheckSql,
     /// Read one live Metasys point while configuring a portal region.
     CheckTemperature {
         #[arg(long)]
@@ -84,6 +104,23 @@ async fn main() -> Result<()> {
             check(config).await
         }
         Some(Command::PortalAdmin { email, name }) => create_portal_admin(config, email, name),
+        Some(Command::ConfigureSql {
+            host,
+            port,
+            database,
+            username,
+            trust_server_certificate,
+            legacy_tls,
+        }) => configure_sql(
+            config,
+            host,
+            port,
+            database,
+            username,
+            trust_server_certificate,
+            legacy_tls,
+        ),
+        Some(Command::CheckSql) => check_sql(config).await,
         Some(Command::CheckTemperature {
             reference,
             attribute,
@@ -93,6 +130,77 @@ async fn main() -> Result<()> {
         }
         None => serve(config, cli.open_browser || launched_from_app_bundle()).await,
     }
+}
+
+async fn check_sql(config: Config) -> Result<()> {
+    config.ensure_data_directory()?;
+    let store = Store::open(&config.database_path)?;
+    let settings = store.sql_trend_settings()?;
+    if !settings.enabled {
+        bail!("SQL trend source is disabled");
+    }
+
+    test_connection(&settings).await?;
+    let catalog = fetch_trend_points(&settings).await?;
+    let probe = catalog
+        .points
+        .iter()
+        .find(|point| point.point_name.to_ascii_uppercase().contains("ZN-T"))
+        .or_else(|| catalog.points.first())
+        .context("SQL historian point catalog is empty")?;
+    let trends = fetch_trends(&settings, 24 * 365 * 5, &[probe.point_slice_id]).await?;
+    println!(
+        "SQL trend check OK: {} catalog points | {} samples from one read-only probe{}",
+        catalog.points.len(),
+        trends.sample_count,
+        if catalog.truncated {
+            " | catalog truncated"
+        } else {
+            ""
+        }
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn configure_sql(
+    config: Config,
+    host: String,
+    port: u16,
+    database: String,
+    username: String,
+    trust_server_certificate: bool,
+    legacy_tls: bool,
+) -> Result<()> {
+    let settings = SqlTrendSettings {
+        enabled: true,
+        host,
+        port,
+        database,
+        username,
+        trust_server_certificate,
+        legacy_tls,
+        ..Default::default()
+    };
+    settings.validate()?;
+    let password =
+        rpassword::prompt_password(format!("SQL Server password for {}: ", settings.username))?;
+    if password.is_empty() {
+        bail!("password cannot be empty");
+    }
+    let confirmation = rpassword::prompt_password("Confirm SQL Server password: ")?;
+    if password != confirmation {
+        bail!("passwords do not match");
+    }
+    config.ensure_data_directory()?;
+    let store = Store::open(&config.database_path)?;
+    set_sql_password(&password)?;
+    store.save_sql_trend_settings(&settings)?;
+    println!(
+        "Read-only SQL trend connection saved locally for {}.",
+        settings.username
+    );
+    Ok(())
 }
 
 async fn check_temperature(config: Config, reference: String, attribute: String) -> Result<()> {

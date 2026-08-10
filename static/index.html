@@ -132,10 +132,23 @@
               <option value="168" selected>7 days</option>
               <option value="336">14 days</option>
               <option value="720">30 days</option>
+              <option value="2160">90 days</option>
+              <option value="8760">1 year</option>
+              <option value="26280">3 years</option>
+              <option value="43800">5 years</option>
             </select>
             <button id="load-trends-button" class="small-button" type="button">Load trends</button>
           </div>
         </header>
+        <div class="trend-point-browser">
+          <div class="trend-point-toolbar">
+            <label for="trend-point-search">Historian points</label>
+            <input id="trend-point-search" type="search" placeholder="Search equipment or point name" autocomplete="off">
+            <button id="load-trend-points-button" class="small-button" type="button">Browse points</button>
+          </div>
+          <select id="trend-point-select" multiple size="7" aria-label="Select up to eight historian points"></select>
+          <small id="trend-point-selection">Select up to eight points. With no selection, the configured advanced query is used.</small>
+        </div>
         <div id="trend-message" class="trend-message">Configure a read-only SQL Server trend source from this Mac.</div>
         <div class="chart-stage trend-stage">
           <canvas id="sql-trend-chart" role="img" aria-label="Metasys SQL trend samples"></canvas>
@@ -257,8 +270,9 @@
         <label>Username<input id="sql-username" name="username" required maxlength="256" autocomplete="username" placeholder="trend_reader"></label>
         <label class="full-field">Password<input id="sql-password" name="password" type="password" autocomplete="new-password" placeholder="Leave blank to keep Keychain password"><small id="sql-password-state">No password saved</small></label>
         <label class="checkbox-field full-field"><input id="sql-trust-certificate" type="checkbox"> Trust SQL Server certificate (private/self-signed deployments only)</label>
+        <label class="checkbox-field full-field warning-field"><input id="sql-legacy-tls" type="checkbox"> Enable isolated legacy TLS compatibility (TLS 1.0; obsolete servers only)</label>
         <label class="checkbox-field full-field"><input id="sql-clear-password" type="checkbox"> Remove saved SQL password</label>
-        <label class="full-field">Read-only trend query<textarea id="sql-query" name="query" rows="10" required spellcheck="false"></textarea><small>Must return point_name, sample_time, sample_value, and unit. Use @P1 and @P2 for date bounds.</small></label>
+        <label class="full-field">Advanced read-only trend query<textarea id="sql-query" name="query" rows="10" required spellcheck="false"></textarea><small>Used when no points are selected. Must return point_name, sample_time, sample_value, and unit, using @P1 and @P2 for date bounds.</small></label>
       </div>
       <footer class="dialog-actions">
         <button id="sql-test-button" class="secondary-button" type="button">Test saved connection</button>

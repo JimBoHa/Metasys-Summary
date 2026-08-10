@@ -1,4 +1,5 @@
 /target/
+/legacy-sql-helper/target/
 /.DS_Store
 /config.toml
 /.env
