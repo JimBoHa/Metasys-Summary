@@ -1,6 +1,6 @@
 use chrono::{Duration, Utc};
 
-use crate::models::{AlarmRecord, OverrideRecord, PollData};
+use crate::models::{AlarmRecord, FeedStatus, OverrideRecord, PointExceptionRecord, PollData};
 
 pub fn poll_data() -> PollData {
     let equipment = [
@@ -47,6 +47,7 @@ pub fn poll_data() -> PollData {
                 index % points.len()
             ),
             equipment: equipment_name.to_owned(),
+            equipment_origin: "server".to_owned(),
             point: point.to_owned(),
             message: demo_message(alarm_type, equipment_name, point),
             alarm_type: alarm_type.to_owned(),
@@ -61,6 +62,7 @@ pub fn poll_data() -> PollData {
             acknowledged: index % 3 == 0,
             occurrence_count: 1,
             source: "demo".to_owned(),
+            last_seen_at: Some(now),
         });
     }
     let active_alarms = alarms
@@ -79,12 +81,30 @@ pub fn poll_data() -> PollData {
         ),
         override_record("RTU-3", "Occupancy", "Occupied", None),
     ];
+    let point_exceptions = overrides
+        .iter()
+        .map(|record| PointExceptionRecord {
+            object_id: record.object_id.clone(),
+            equipment: record.equipment.clone(),
+            point: record.point.clone(),
+            value: record.value.clone(),
+            status: record.status.clone(),
+            status_id: Some(86),
+            kind: "override".to_owned(),
+            expires_at: record.expires_at,
+        })
+        .collect::<Vec<_>>();
     PollData {
         connector: "Demo data".to_owned(),
         server_version: Some("Demo 1.0".to_owned()),
         alarms,
         active_alarms,
         overrides,
+        exception_feed: FeedStatus::available(
+            "Demonstration point-exception feed is available",
+            point_exceptions.len(),
+        ),
+        point_exceptions,
     }
 }
 

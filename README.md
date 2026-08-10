@@ -35,7 +35,7 @@ cargo run -- check
 cargo run
 ```
 
-Open `http://127.0.0.1:3030` for the maintenance portal. Administrators and operators can open the alarm dashboard at `/operations` and the historian analysis workspace at `/trends`. To allow other local-network devices, set `bind_address = "0.0.0.0"`; then open `http://<this-mac-ip>:3030` after macOS Firewall allows incoming connections.
+Open `http://127.0.0.1:3030` for the maintenance portal. Administrators and operators can open the alarm dashboard at `/operations`, system diagnostics at `/diagnostics`, and historian analysis at `/trends`. To allow other local-network devices, set `bind_address = "0.0.0.0"`; then open `http://<this-mac-ip>:3030` after macOS Firewall allows incoming connections.
 
 To preview the complete dashboard without Metasys:
 
@@ -77,10 +77,13 @@ The authenticated interface uses a persistent, grouped left sidebar for building
 - Problematic equipment ranked by alarm volume, active alarms, and severity
 - Fourteen-day daily alarm chart with a seven-day rolling mean
 - Alarm-type and equipment-share donut charts
+- Six-tab diagnostic workspace with prioritized findings, full alarm-field search and CSV export, equipment/system correlation, time patterns, current point exceptions, poll reliability, and data-completeness indicators
 - Configurable encrypted email reports with manual, daily, weekday, or weekly delivery
 - Optional Microsoft SQL Server historian workspace with point search, custom ranges, safe aggregation, zoom, statistics, normalization, smoothing, data table, and CSV export
 
 Modern Metasys REST versions v2-v6 are auto-detected. REST v5/v6 uses activities; v2-v4 uses alarm collections with version-appropriate filters. The legacy connector uses Alarm Manager for events and Potential Problem Areas for overrides. SQLite deduplicates event IDs across polls, so the local 30-day index improves continuously even when an older Metasys endpoint returns a limited initial history.
+
+The diagnostics workspace is read-only and analyzes the cached poll rather than issuing expensive queries from the browser. See [system diagnostics](docs/diagnostics.md) for tab behavior, scoring, inferred equipment labels, and source limitations.
 
 ## Maintenance portal
 

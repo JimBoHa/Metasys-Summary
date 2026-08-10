@@ -9,7 +9,8 @@ const staticDirectory = path.join(repositoryDirectory, "static");
 const pageContracts = [
   { html: "portal.html", scripts: ["portal.js"] },
   { html: "index.html", scripts: ["app.js"] },
-  { html: "trends.html", scripts: ["trends.js"] }
+  { html: "trends.html", scripts: ["trends.js"] },
+  { html: "diagnostics.html", scripts: ["diagnostics.js"] }
 ];
 const errors = [];
 

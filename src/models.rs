@@ -6,6 +6,7 @@ pub struct AlarmRecord {
     pub id: String,
     pub object_id: String,
     pub equipment: String,
+    pub equipment_origin: String,
     pub point: String,
     pub message: String,
     pub alarm_type: String,
@@ -16,6 +17,7 @@ pub struct AlarmRecord {
     pub acknowledged: bool,
     pub occurrence_count: u64,
     pub source: String,
+    pub last_seen_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -30,6 +32,51 @@ pub struct OverrideRecord {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PointExceptionRecord {
+    pub object_id: String,
+    pub equipment: String,
+    pub point: String,
+    pub value: String,
+    pub status: String,
+    pub status_id: Option<u64>,
+    pub kind: String,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedStatus {
+    pub state: String,
+    pub message: String,
+    pub record_count: usize,
+}
+
+impl FeedStatus {
+    pub fn available(message: impl Into<String>, record_count: usize) -> Self {
+        Self {
+            state: "available".to_owned(),
+            message: message.into(),
+            record_count,
+        }
+    }
+
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self {
+            state: "unavailable".to_owned(),
+            message: message.into(),
+            record_count: 0,
+        }
+    }
+}
+
+impl Default for FeedStatus {
+    fn default() -> Self {
+        Self::unavailable("Waiting for the first point-exception scan")
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PollData {
     pub connector: String,
@@ -37,6 +84,8 @@ pub struct PollData {
     pub alarms: Vec<AlarmRecord>,
     pub active_alarms: Vec<AlarmRecord>,
     pub overrides: Vec<OverrideRecord>,
+    pub point_exceptions: Vec<PointExceptionRecord>,
+    pub exception_feed: FeedStatus,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -157,6 +206,62 @@ pub fn clean_enum(value: &str) -> String {
     }
 }
 
+pub fn infer_equipment_name(object_id: &str, point: &str) -> Option<String> {
+    let point = point.trim();
+    if point.is_empty() || point.eq_ignore_ascii_case("unknown point") {
+        return None;
+    }
+    let point_prefix = point.split('.').next().unwrap_or(point).trim();
+    if looks_like_equipment(point_prefix) {
+        return Some(point_prefix.to_owned());
+    }
+    if looks_like_equipment(point) {
+        return Some(point.to_owned());
+    }
+
+    let reference_tail = object_id
+        .rsplit('/')
+        .next()
+        .unwrap_or(object_id)
+        .split(',')
+        .next()
+        .unwrap_or(object_id)
+        .trim();
+    let suffix = format!(".{point}");
+    if let Some(candidate) = reference_tail.strip_suffix(&suffix) {
+        let candidate = candidate.rsplit('.').next().unwrap_or(candidate).trim();
+        if !candidate.is_empty() && !is_transport_segment(candidate) {
+            return Some(candidate.to_owned());
+        }
+    }
+    if let Some(candidate) = reference_tail
+        .split('.')
+        .rev()
+        .find(|candidate| looks_like_equipment(candidate))
+    {
+        return Some(candidate.to_owned());
+    }
+    Some(point.to_owned())
+}
+
+fn looks_like_equipment(value: &str) -> bool {
+    let upper = value.trim().to_ascii_uppercase();
+    [
+        "AHU", "RTU", "VAV", "FAV", "FCU", "TB", "EF", "SF", "RF", "CHLR", "CH-", "BOILER", "PUMP",
+        "HWP", "CWP", "HX", "MAU", "DOAS", "CRAC", "FAN", "UNIT", "UPS", "GEN",
+    ]
+    .iter()
+    .any(|prefix| upper.starts_with(prefix))
+}
+
+fn is_transport_segment(value: &str) -> bool {
+    let upper = value.trim().to_ascii_uppercase();
+    upper == "BACNETIP"
+        || upper == "BACNET"
+        || upper.starts_with("FC-")
+        || upper.starts_with("NAE-")
+}
+
 impl From<&AlarmRecord> for AlarmView {
     fn from(alarm: &AlarmRecord) -> Self {
         Self {
@@ -177,7 +282,7 @@ impl From<&AlarmRecord> for AlarmView {
 
 #[cfg(test)]
 mod tests {
-    use super::{clean_enum, severity};
+    use super::{clean_enum, infer_equipment_name, severity};
 
     #[test]
     fn cleans_metasys_enum_names() {
@@ -192,5 +297,21 @@ mod tests {
     fn lower_priority_number_is_more_severe() {
         assert_eq!(severity(20), "critical");
         assert_eq!(severity(180), "low");
+    }
+
+    #[test]
+    fn infers_equipment_from_legacy_references_and_terminal_box_names() {
+        assert_eq!(
+            infer_equipment_name("SERVER:NAE/AHU-4.SAT", "SAT").as_deref(),
+            Some("AHU-4")
+        );
+        assert_eq!(
+            infer_equipment_name("SERVER:NAE/FC-1.TB6-P06", "TB6-P06").as_deref(),
+            Some("TB6-P06")
+        );
+        assert_eq!(
+            infer_equipment_name("SERVER:NAE/FC-1.AHU-4.SMK-S", "AHU-4.SMK-S").as_deref(),
+            Some("AHU-4")
+        );
     }
 }

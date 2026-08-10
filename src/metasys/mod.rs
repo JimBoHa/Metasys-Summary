@@ -82,9 +82,7 @@ impl MetasysClient {
             ResolvedConnector::Modern { version } => {
                 modern::fetch(&self.http, &self.config, &session.token, version).await
             }
-            ResolvedConnector::Legacy => {
-                legacy::fetch(&self.http, &self.config, &session.token).await
-            }
+            ResolvedConnector::Legacy => legacy::fetch(&self.http, &self.config, &session).await,
         };
         if result.is_err() {
             self.state.lock().await.session = None;

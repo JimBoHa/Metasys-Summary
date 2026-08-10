@@ -28,6 +28,9 @@ const STYLES_CSS: &str = include_str!("../static/styles.css");
 const TRENDS_HTML: &str = include_str!("../static/trends.html");
 const TRENDS_JS: &str = include_str!("../static/trends.js");
 const TRENDS_CSS: &str = include_str!("../static/trends.css");
+const DIAGNOSTICS_HTML: &str = include_str!("../static/diagnostics.html");
+const DIAGNOSTICS_JS: &str = include_str!("../static/diagnostics.js");
+const DIAGNOSTICS_CSS: &str = include_str!("../static/diagnostics.css");
 const NAVIGATION_JS: &str = include_str!("../static/navigation.js");
 const NAVIGATION_CSS: &str = include_str!("../static/navigation.css");
 
@@ -37,14 +40,18 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/operations", get(index))
         .route("/trends", get(trends_index))
+        .route("/diagnostics", get(diagnostics_index))
         .route("/app.js", get(javascript))
         .route("/styles.css", get(stylesheet))
         .route("/trends.js", get(trends_javascript))
         .route("/trends.css", get(trends_stylesheet))
+        .route("/diagnostics.js", get(diagnostics_javascript))
+        .route("/diagnostics.css", get(diagnostics_stylesheet))
         .route("/navigation.js", get(navigation_javascript))
         .route("/navigation.css", get(navigation_stylesheet))
         .route("/api/dashboard", get(dashboard))
         .route("/api/health", get(health))
+        .route("/api/diagnostics", get(diagnostics))
         .route("/api/refresh", post(refresh))
         .route(
             "/api/settings/reports",
@@ -79,6 +86,17 @@ async fn trends_index(
     Ok(static_response(TRENDS_HTML, "text/html; charset=utf-8"))
 }
 
+async fn diagnostics_index(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> WebResult<Response> {
+    require_role(&state, &headers, &[PortalRole::Admin, PortalRole::Operator])?;
+    Ok(static_response(
+        DIAGNOSTICS_HTML,
+        "text/html; charset=utf-8",
+    ))
+}
+
 async fn javascript() -> Response {
     static_response(APP_JS, "text/javascript; charset=utf-8")
 }
@@ -93,6 +111,14 @@ async fn trends_javascript() -> Response {
 
 async fn trends_stylesheet() -> Response {
     static_response(TRENDS_CSS, "text/css; charset=utf-8")
+}
+
+async fn diagnostics_javascript() -> Response {
+    static_response(DIAGNOSTICS_JS, "text/javascript; charset=utf-8")
+}
+
+async fn diagnostics_stylesheet() -> Response {
+    static_response(DIAGNOSTICS_CSS, "text/css; charset=utf-8")
 }
 
 async fn navigation_javascript() -> Response {
@@ -121,6 +147,18 @@ async fn health(
 ) -> WebResult<Json<crate::models::HealthView>> {
     require_role(&state, &headers, &[PortalRole::Admin, PortalRole::Operator])?;
     Ok(Json(state.health().await))
+}
+
+async fn diagnostics(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> WebResult<Json<crate::diagnostics::DiagnosticsView>> {
+    require_role(&state, &headers, &[PortalRole::Admin, PortalRole::Operator])?;
+    state
+        .diagnostics()
+        .await
+        .map(Json)
+        .map_err(PortalError::dashboard)
 }
 
 async fn refresh(
@@ -542,6 +580,8 @@ mod tests {
             "/portal.css",
             "/navigation.js",
             "/navigation.css",
+            "/diagnostics.js",
+            "/diagnostics.css",
         ] {
             let response = call(&app, request(Method::GET, path, None, None)).await;
             assert_eq!(
@@ -586,7 +626,14 @@ mod tests {
             );
         }
 
-        for path in ["/operations", "/trends", "/api/dashboard", "/api/trends"] {
+        for path in [
+            "/operations",
+            "/trends",
+            "/diagnostics",
+            "/api/dashboard",
+            "/api/trends",
+            "/api/diagnostics",
+        ] {
             let response = call(&app, request(Method::GET, path, None, None)).await;
             assert_eq!(
                 response.status(),
@@ -989,6 +1036,24 @@ mod tests {
                 .status(),
             StatusCode::FORBIDDEN
         );
+        assert_eq!(
+            call(
+                &app,
+                request(Method::GET, "/diagnostics", None, Some(&viewer)),
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(
+                &app,
+                request(Method::GET, "/api/diagnostics", None, Some(&viewer)),
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
         let report_body = json!({
             "regionId": region_a,
             "contactEmail": "occupant@example.test",
@@ -1095,6 +1160,24 @@ mod tests {
             call(&app, request(Method::GET, "/trends", None, Some(&operator)),)
                 .await
                 .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(
+                &app,
+                request(Method::GET, "/diagnostics", None, Some(&operator)),
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(
+                &app,
+                request(Method::GET, "/api/diagnostics", None, Some(&operator)),
+            )
+            .await
+            .status(),
             StatusCode::OK
         );
     }

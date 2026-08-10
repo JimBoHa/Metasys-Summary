@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use anyhow::Result;
 use chrono::Utc;
@@ -15,7 +15,10 @@ use crate::{
         EmailReportSettingsView, clear_smtp_password, send_report, set_smtp_password, test_smtp,
     },
     metasys::MetasysClient,
-    models::{AlarmRecord, DashboardView, HealthView, OverrideRecord, PollData},
+    models::{
+        AlarmRecord, DashboardView, FeedStatus, HealthView, OverrideRecord, PointExceptionRecord,
+        PollData,
+    },
     portal::models::{PortalMapView, PortalUserRecord, TemperatureReading},
     sql_trends::{
         SqlTrendSettingsUpdate, SqlTrendSettingsView, TrendPointCatalog, TrendResponse,
@@ -30,6 +33,8 @@ struct LiveData {
     health: HealthView,
     active_alarms: Vec<AlarmRecord>,
     overrides: Vec<OverrideRecord>,
+    point_exceptions: Vec<PointExceptionRecord>,
+    exception_feed: FeedStatus,
 }
 
 #[derive(Clone)]
@@ -68,6 +73,7 @@ impl AppState {
             return;
         };
         let attempted_at = Utc::now();
+        let poll_started = Instant::now();
         {
             let mut live = self.live.write().await;
             live.health.last_attempt_at = Some(attempted_at);
@@ -81,13 +87,22 @@ impl AppState {
         match client.fetch().await {
             Ok(data) => {
                 if let Err(error) = self
-                    .apply_successful_poll(data, attempted_at, history_days)
+                    .apply_successful_poll(
+                        data,
+                        attempted_at,
+                        history_days,
+                        elapsed_millis(poll_started),
+                    )
                     .await
                 {
-                    self.record_failure(error).await;
+                    self.record_failure(error, elapsed_millis(poll_started))
+                        .await;
                 }
             }
-            Err(error) => self.record_failure(error).await,
+            Err(error) => {
+                self.record_failure(error, elapsed_millis(poll_started))
+                    .await
+            }
         }
     }
 
@@ -96,12 +111,16 @@ impl AppState {
         data: PollData,
         attempted_at: chrono::DateTime<Utc>,
         history_days: i64,
+        duration_ms: u64,
     ) -> Result<()> {
         self.store.upsert_alarms(&data.alarms)?;
-        if let Err(error) =
-            self.store
-                .record_poll(true, data.active_alarms.len(), data.overrides.len(), None)
-        {
+        if let Err(error) = self.store.record_poll(
+            true,
+            data.active_alarms.len(),
+            data.overrides.len(),
+            duration_ms,
+            None,
+        ) {
             tracing::warn!(error = %error, "failed to record successful poll");
         }
         if let Err(error) = self.store.prune(history_days + 7) {
@@ -125,20 +144,25 @@ impl AppState {
         };
         live.active_alarms = data.active_alarms;
         live.overrides = data.overrides;
+        live.point_exceptions = data.point_exceptions;
+        live.exception_feed = data.exception_feed;
         Ok(())
     }
 
-    async fn record_failure(&self, error: anyhow::Error) {
+    async fn record_failure(&self, error: anyhow::Error, duration_ms: u64) {
         let message = error.to_string();
         tracing::warn!(error = %message, "Metasys poll failed");
         let (active_count, override_count) = {
             let live = self.live.read().await;
             (live.active_alarms.len(), live.overrides.len())
         };
-        if let Err(store_error) =
-            self.store
-                .record_poll(false, active_count, override_count, Some(&message))
-        {
+        if let Err(store_error) = self.store.record_poll(
+            false,
+            active_count,
+            override_count,
+            duration_ms,
+            Some(&message),
+        ) {
             tracing::warn!(error = %store_error, "failed to record unsuccessful poll");
         }
         let mut live = self.live.write().await;
@@ -155,6 +179,20 @@ impl AppState {
             live.health.clone(),
             &live.active_alarms,
             &live.overrides,
+            history_days,
+        )
+    }
+
+    pub async fn diagnostics(&self) -> Result<crate::diagnostics::DiagnosticsView> {
+        let live = self.live.read().await;
+        let history_days = self.config.read().await.history_days;
+        crate::diagnostics::build_diagnostics(
+            &self.store,
+            live.health.clone(),
+            &live.active_alarms,
+            &live.overrides,
+            &live.point_exceptions,
+            live.exception_feed.clone(),
             history_days,
         )
     }
@@ -201,6 +239,7 @@ impl AppState {
         let replacement_config = Arc::new(replacement_config);
         let replacement_client = Arc::new(MetasysClient::new(replacement_config.clone())?);
         let attempted_at = Utc::now();
+        let connection_started = Instant::now();
         let data = replacement_client
             .fetch()
             .await
@@ -227,8 +266,13 @@ impl AppState {
         *self.config.write().await = replacement_config;
         *self.client.write().await = replacement_client;
         self.temperature_cache.write().await.clear();
-        self.apply_successful_poll(data, attempted_at, history_days)
-            .await?;
+        self.apply_successful_poll(
+            data,
+            attempted_at,
+            history_days,
+            elapsed_millis(connection_started),
+        )
+        .await?;
 
         Ok(MetasysConnectionResult {
             settings: settings.view(true),
@@ -433,6 +477,10 @@ impl AppState {
         );
         reading
     }
+}
+
+fn elapsed_millis(started_at: Instant) -> u64 {
+    started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 fn metasys_connection_test_failure(error: anyhow::Error) -> anyhow::Error {

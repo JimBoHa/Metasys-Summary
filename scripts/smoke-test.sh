@@ -89,6 +89,8 @@ assert_contains "$smoke_directory/root.headers" "x-frame-options: DENY"
 
 expect_status 200 "$smoke_directory/navigation.js" "$base_url/navigation.js"
 expect_status 200 "$smoke_directory/navigation.css" "$base_url/navigation.css"
+expect_status 200 "$smoke_directory/diagnostics.js" "$base_url/diagnostics.js"
+expect_status 200 "$smoke_directory/diagnostics.css" "$base_url/diagnostics.css"
 expect_status 401 "$smoke_directory/unauthorized.json" "$base_url/operations"
 
 expect_status 200 "$smoke_directory/session.json" \
@@ -108,7 +110,11 @@ assert_contains "$smoke_directory/operations.html" "Operations Dashboard"
 assert_contains "$smoke_directory/operations.html" "primary-sidebar"
 expect_status 200 "$smoke_directory/trends.html" --cookie "$smoke_directory/cookies.txt" "$base_url/trends"
 assert_contains "$smoke_directory/trends.html" "Metasys Trend Analysis"
+expect_status 200 "$smoke_directory/diagnostics.html" --cookie "$smoke_directory/cookies.txt" "$base_url/diagnostics"
+assert_contains "$smoke_directory/diagnostics.html" "System Diagnostics"
 expect_status 200 "$smoke_directory/dashboard.json" --cookie "$smoke_directory/cookies.txt" "$base_url/api/dashboard"
+expect_status 200 "$smoke_directory/diagnostics.json" --cookie "$smoke_directory/cookies.txt" "$base_url/api/diagnostics"
+assert_contains "$smoke_directory/diagnostics.json" '"summary"'
 expect_status 403 "$smoke_directory/missing-csrf.json" --cookie "$smoke_directory/cookies.txt" --request POST --header "Sec-Fetch-Site: same-origin" "$base_url/api/refresh"
 expect_status 202 "$smoke_directory/refresh.json" --cookie "$smoke_directory/cookies.txt" --request POST --header "Sec-Fetch-Site: same-origin" --header "X-CSRF-Token: $csrf_token" "$base_url/api/refresh"
 expect_status 200 "$smoke_directory/logout.json" --cookie "$smoke_directory/cookies.txt" --request POST --header "Sec-Fetch-Site: same-origin" --header "X-CSRF-Token: $csrf_token" "$base_url/api/portal/logout"
