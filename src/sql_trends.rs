@@ -100,12 +100,10 @@ impl Default for SqlTrendSettings {
 
 impl SqlTrendSettings {
     pub fn upgrade_legacy_defaults(mut self) -> Self {
-        if self.query.contains(LEGACY_ZONE_ONLY_FILTER)
-            && !self.query.contains("OR p.PointName LIKE")
-        {
-            self.query = self
-                .query
-                .replacen(LEGACY_ZONE_ONLY_FILTER, DEFAULT_HVAC_FILTER, 1);
+        let legacy_default =
+            DEFAULT_QUERY.replacen(DEFAULT_HVAC_FILTER, LEGACY_ZONE_ONLY_FILTER, 1);
+        if self.query == legacy_default {
+            self.query = DEFAULT_QUERY.to_owned();
         }
         self
     }
@@ -1188,9 +1186,7 @@ mod tests {
     #[test]
     fn upgrades_the_zone_only_built_in_query_to_featured_hvac_families() {
         let settings = SqlTrendSettings {
-            query: format!(
-                "SELECT * FROM samples WHERE sample_time >= @P1 AND sample_time <= @P2 AND {LEGACY_ZONE_ONLY_FILTER}"
-            ),
+            query: super::DEFAULT_QUERY.replacen(DEFAULT_HVAC_FILTER, LEGACY_ZONE_ONLY_FILTER, 1),
             ..Default::default()
         }
         .upgrade_legacy_defaults();
@@ -1201,5 +1197,15 @@ mod tests {
             assert!(settings.query.contains(family));
         }
         validate_read_only_query(&settings.query).unwrap();
+
+        let custom_query = format!(
+            "SELECT * FROM samples WHERE sample_time >= @P1 AND sample_time <= @P2 AND {LEGACY_ZONE_ONLY_FILTER}"
+        );
+        let custom_settings = SqlTrendSettings {
+            query: custom_query.clone(),
+            ..Default::default()
+        }
+        .upgrade_legacy_defaults();
+        assert_eq!(custom_settings.query, custom_query);
     }
 }
