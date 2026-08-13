@@ -258,14 +258,12 @@ impl Config {
             .unwrap_or_else(|| default_data_dir.join("dashboard.sqlite3"));
         let history_database_path = env::var_os("METASYS_HISTORY_DATABASE_PATH")
             .map(PathBuf::from)
-            .or_else(|| force_demo.then(|| default_data_dir.join("history-demo.duckdb")))
-            .or(file.history_database_path)
-            .unwrap_or_else(|| {
-                database_path
-                    .parent()
-                    .unwrap_or(&default_data_dir)
-                    .join("history.duckdb")
-            });
+            .or(if force_demo {
+                None
+            } else {
+                file.history_database_path
+            })
+            .unwrap_or_else(|| default_history_path(&database_path, &default_data_dir, force_demo));
         let history_sample_interval_seconds = parse_env("METASYS_HISTORY_SAMPLE_INTERVAL_SECONDS")?
             .or(file.history_sample_interval_seconds)
             .unwrap_or(60)
@@ -368,6 +366,22 @@ fn application_support_dir() -> PathBuf {
         .join("Library/Application Support/Metasys Dashboard")
 }
 
+fn default_history_path(
+    database_path: &Path,
+    default_data_dir: &Path,
+    force_demo: bool,
+) -> PathBuf {
+    database_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(default_data_dir)
+        .join(if force_demo {
+            "history-demo.duckdb"
+        } else {
+            "history.duckdb"
+        })
+}
+
 fn env_string(name: &str) -> Option<String> {
     env::var(name).ok().filter(|value| !value.trim().is_empty())
 }
@@ -390,7 +404,26 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{ConnectorPreference, MetasysConnectionUpdate};
+    use std::path::Path;
+
+    use super::{ConnectorPreference, MetasysConnectionUpdate, default_history_path};
+
+    #[test]
+    fn duckdb_history_defaults_beside_the_operational_database() {
+        let default_data = Path::new("/default/application-support");
+        assert_eq!(
+            default_history_path(
+                Path::new("/external/dashboard.sqlite3"),
+                default_data,
+                false
+            ),
+            Path::new("/external/history.duckdb")
+        );
+        assert_eq!(
+            default_history_path(Path::new("/tmp/test/dashboard.sqlite3"), default_data, true),
+            Path::new("/tmp/test/history-demo.duckdb")
+        );
+    }
 
     #[test]
     fn connector_aliases_parse() {
