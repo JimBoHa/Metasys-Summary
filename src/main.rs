@@ -8,8 +8,8 @@ use metasys_dashboard::{
     metasys::MetasysClient,
     portal::{auth::hash_password, models::PortalRole},
     sql_trends::{
-        FEATURED_TREND_POINT_FAMILIES, SqlTrendSettings, fetch_trend_points, fetch_trends,
-        set_sql_password, test_connection,
+        FEATURED_TREND_POINT_FAMILIES, SqlTrendSettings, fetch_live_point_values,
+        fetch_trend_points, fetch_trends, set_sql_password, test_connection,
     },
     store::Store,
     web,
@@ -71,6 +71,16 @@ enum Command {
     },
     /// Verify the saved SQL connection, point catalog, and one read-only trend query.
     CheckSql,
+    /// List saved SQL historian points, optionally filtering by reference text.
+    ListSqlPoints {
+        #[arg(long)]
+        contains: Option<String>,
+    },
+    /// Replace the saved equipment hierarchy from a validated JSON inventory.
+    ImportInventory {
+        #[arg(long)]
+        file: PathBuf,
+    },
     /// Read one live Metasys point while configuring a portal region.
     CheckTemperature {
         #[arg(long)]
@@ -122,6 +132,8 @@ async fn main() -> Result<()> {
             legacy_tls,
         ),
         Some(Command::CheckSql) => check_sql(config).await,
+        Some(Command::ListSqlPoints { contains }) => list_sql_points(config, contains).await,
+        Some(Command::ImportInventory { file }) => import_inventory(config, file),
         Some(Command::CheckTemperature {
             reference,
             attribute,
@@ -131,6 +143,51 @@ async fn main() -> Result<()> {
         }
         None => serve(config, cli.open_browser || launched_from_app_bundle()).await,
     }
+}
+
+fn import_inventory(config: Config, file: PathBuf) -> Result<()> {
+    config.ensure_data_directory()?;
+    let encoded = std::fs::read_to_string(&file)
+        .with_context(|| format!("read equipment inventory {}", file.display()))?;
+    let inventory =
+        serde_json::from_str::<metasys_dashboard::inventory::EquipmentInventory>(&encoded)
+            .with_context(|| format!("decode equipment inventory {}", file.display()))?;
+    inventory.validate()?;
+    let store = Store::open(&config.database_path)?;
+    store.replace_equipment_inventory(&inventory)?;
+    println!(
+        "Equipment inventory imported: {} groups | {} equipment | {} points",
+        inventory.groups.len(),
+        inventory.equipment_count(),
+        inventory.point_count()
+    );
+    Ok(())
+}
+
+async fn list_sql_points(config: Config, contains: Option<String>) -> Result<()> {
+    config.ensure_data_directory()?;
+    let store = Store::open(&config.database_path)?;
+    let settings = store.sql_trend_settings()?;
+    if !settings.enabled {
+        bail!("SQL trend source is disabled");
+    }
+    let catalog = fetch_trend_points(&settings).await?;
+    let contains = contains.map(|value| value.to_ascii_lowercase());
+    for point in catalog.points.iter().filter(|point| {
+        contains
+            .as_ref()
+            .is_none_or(|value| point.point_name.to_ascii_lowercase().contains(value))
+    }) {
+        println!(
+            "{}\t{}\t{}\t{}\t{}",
+            point.point_slice_id,
+            point.point_name,
+            point.unit.as_deref().unwrap_or(""),
+            point.equipment_name,
+            point.point_family,
+        );
+    }
+    Ok(())
 }
 
 async fn check_sql(config: Config) -> Result<()> {
@@ -176,10 +233,34 @@ async fn check_sql(config: Config) -> Result<()> {
         .iter()
         .map(|(_, point)| point.point_slice_id)
         .collect::<Vec<_>>();
+    let inventory_live_probe = store.equipment_inventory()?.and_then(|inventory| {
+        inventory
+            .groups
+            .into_iter()
+            .flat_map(|group| group.equipment)
+            .filter(|equipment| equipment.name.to_ascii_uppercase().starts_with("TB2-2"))
+            .find_map(|equipment| {
+                let ids = equipment
+                    .points
+                    .into_iter()
+                    .filter_map(|point| point.historian_point_slice_id)
+                    .collect::<Vec<_>>();
+                (!ids.is_empty()).then_some((equipment.name, ids))
+            })
+    });
+    let (live_probe_name, live_point_slice_ids) = inventory_live_probe.unwrap_or_else(|| {
+        (
+            "featured historian probes".to_owned(),
+            point_slice_ids.clone(),
+        )
+    });
+    let live_values = fetch_live_point_values(&settings, &live_point_slice_ids).await?;
     let trends = fetch_trends(&settings, 24 * 365 * 5, &point_slice_ids).await?;
     println!(
-        "SQL trend check OK: {} catalog points | {} samples from {} read-only five-year probes{}",
+        "SQL trend check OK: {} catalog points | {} latest values for {} | {} samples from {} read-only five-year probes{}",
         catalog.points.len(),
+        live_values.values.len(),
+        live_probe_name,
         trends.sample_count,
         probes.len(),
         if catalog.truncated {

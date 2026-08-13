@@ -10,7 +10,8 @@ const pageContracts = [
   { html: "portal.html", scripts: ["portal.js"] },
   { html: "index.html", scripts: ["app.js"] },
   { html: "trends.html", scripts: ["trends.js"] },
-  { html: "diagnostics.html", scripts: ["diagnostics.js"] }
+  { html: "diagnostics.html", scripts: ["diagnostics.js"] },
+  { html: "equipment.html", scripts: ["equipment.js"] }
 ];
 const errors = [];
 

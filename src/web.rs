@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{collections::BTreeSet, net::SocketAddr, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -19,7 +19,7 @@ use crate::{
         models::{PortalRole, PortalSession},
         web::{PortalError, require_authenticated_role, require_request_csrf},
     },
-    sql_trends::SqlTrendSettingsUpdate,
+    sql_trends::{MAX_LIVE_POINT_VALUES, SqlTrendSettingsUpdate},
 };
 
 const INDEX_HTML: &str = include_str!("../static/index.html");
@@ -31,6 +31,9 @@ const TRENDS_CSS: &str = include_str!("../static/trends.css");
 const DIAGNOSTICS_HTML: &str = include_str!("../static/diagnostics.html");
 const DIAGNOSTICS_JS: &str = include_str!("../static/diagnostics.js");
 const DIAGNOSTICS_CSS: &str = include_str!("../static/diagnostics.css");
+const EQUIPMENT_HTML: &str = include_str!("../static/equipment.html");
+const EQUIPMENT_JS: &str = include_str!("../static/equipment.js");
+const EQUIPMENT_CSS: &str = include_str!("../static/equipment.css");
 const NAVIGATION_JS: &str = include_str!("../static/navigation.js");
 const NAVIGATION_CSS: &str = include_str!("../static/navigation.css");
 
@@ -41,17 +44,22 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/operations", get(index))
         .route("/trends", get(trends_index))
         .route("/diagnostics", get(diagnostics_index))
+        .route("/equipment", get(equipment_index))
         .route("/app.js", get(javascript))
         .route("/styles.css", get(stylesheet))
         .route("/trends.js", get(trends_javascript))
         .route("/trends.css", get(trends_stylesheet))
         .route("/diagnostics.js", get(diagnostics_javascript))
         .route("/diagnostics.css", get(diagnostics_stylesheet))
+        .route("/equipment.js", get(equipment_javascript))
+        .route("/equipment.css", get(equipment_stylesheet))
         .route("/navigation.js", get(navigation_javascript))
         .route("/navigation.css", get(navigation_stylesheet))
         .route("/api/dashboard", get(dashboard))
         .route("/api/health", get(health))
         .route("/api/diagnostics", get(diagnostics))
+        .route("/api/equipment-inventory", get(equipment_inventory))
+        .route("/api/equipment-values", get(equipment_values))
         .route("/api/refresh", post(refresh))
         .route(
             "/api/settings/reports",
@@ -97,6 +105,14 @@ async fn diagnostics_index(
     ))
 }
 
+async fn equipment_index(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> WebResult<Response> {
+    require_role(&state, &headers, &[PortalRole::Admin, PortalRole::Operator])?;
+    Ok(static_response(EQUIPMENT_HTML, "text/html; charset=utf-8"))
+}
+
 async fn javascript() -> Response {
     static_response(APP_JS, "text/javascript; charset=utf-8")
 }
@@ -119,6 +135,14 @@ async fn diagnostics_javascript() -> Response {
 
 async fn diagnostics_stylesheet() -> Response {
     static_response(DIAGNOSTICS_CSS, "text/css; charset=utf-8")
+}
+
+async fn equipment_javascript() -> Response {
+    static_response(EQUIPMENT_JS, "text/javascript; charset=utf-8")
+}
+
+async fn equipment_stylesheet() -> Response {
+    static_response(EQUIPMENT_CSS, "text/css; charset=utf-8")
 }
 
 async fn navigation_javascript() -> Response {
@@ -159,6 +183,48 @@ async fn diagnostics(
         .await
         .map(Json)
         .map_err(PortalError::dashboard)
+}
+
+async fn equipment_inventory(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> WebResult<Json<Option<crate::inventory::EquipmentInventory>>> {
+    require_role(&state, &headers, &[PortalRole::Admin, PortalRole::Operator])?;
+    state
+        .store()
+        .equipment_inventory()
+        .map(Json)
+        .map_err(PortalError::dashboard)
+}
+
+#[derive(Deserialize)]
+struct EquipmentValuesQuery {
+    #[serde(default, rename = "pointSlices")]
+    point_slices: Option<String>,
+}
+
+async fn equipment_values(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<EquipmentValuesQuery>,
+) -> WebResult<Json<crate::sql_trends::LivePointValuesResponse>> {
+    require_role(&state, &headers, &[PortalRole::Admin, PortalRole::Operator])?;
+    let point_slice_ids = parse_point_slice_ids(query.point_slices.as_deref())?;
+    if point_slice_ids.is_empty() {
+        return Err(PortalError::bad_request(anyhow::anyhow!(
+            "select at least one historian point"
+        )));
+    }
+    if point_slice_ids.len() > MAX_LIVE_POINT_VALUES {
+        return Err(PortalError::bad_request(anyhow::anyhow!(
+            "select no more than {MAX_LIVE_POINT_VALUES} historian points"
+        )));
+    }
+    state
+        .live_point_values(&point_slice_ids)
+        .await
+        .map(Json)
+        .map_err(PortalError::bad_gateway)
 }
 
 async fn refresh(
@@ -358,7 +424,7 @@ fn parse_point_slice_ids(value: Option<&str>) -> WebResult<Vec<i32>> {
     let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
         return Ok(Vec::new());
     };
-    value
+    let point_slice_ids = value
         .split(',')
         .map(|part| {
             part.trim().parse::<i32>().map_err(|_| {
@@ -367,7 +433,18 @@ fn parse_point_slice_ids(value: Option<&str>) -> WebResult<Vec<i32>> {
                 ))
             })
         })
-        .collect()
+        .collect::<WebResult<Vec<_>>>()?;
+    let unique = point_slice_ids
+        .iter()
+        .copied()
+        .filter(|value| *value > 0)
+        .collect::<BTreeSet<_>>();
+    if unique.len() != point_slice_ids.len() {
+        return Err(PortalError::bad_request(anyhow::anyhow!(
+            "historian point selections must be unique positive identifiers"
+        )));
+    }
+    Ok(point_slice_ids)
 }
 
 fn require_role(
@@ -448,7 +525,7 @@ mod tests {
     use tempfile::tempdir;
     use tower::ServiceExt;
 
-    use super::{TrendQuery, resolve_trend_window, router};
+    use super::{TrendQuery, parse_point_slice_ids, resolve_trend_window, router};
     use crate::{
         app::AppState,
         config::{Config, ConnectorPreference},
@@ -566,6 +643,14 @@ mod tests {
         );
     }
 
+    #[test]
+    fn point_value_query_requires_unique_positive_numeric_ids() {
+        assert_eq!(parse_point_slice_ids(Some("7,42")).ok(), Some(vec![7, 42]));
+        assert!(parse_point_slice_ids(Some("7,7")).is_err());
+        assert!(parse_point_slice_ids(Some("0")).is_err());
+        assert!(parse_point_slice_ids(Some("not-a-number")).is_err());
+    }
+
     #[tokio::test]
     async fn public_assets_have_security_headers_and_protected_pages_require_login() {
         let directory = tempdir().unwrap();
@@ -582,6 +667,8 @@ mod tests {
             "/navigation.css",
             "/diagnostics.js",
             "/diagnostics.css",
+            "/equipment.js",
+            "/equipment.css",
         ] {
             let response = call(&app, request(Method::GET, path, None, None)).await;
             assert_eq!(
@@ -630,9 +717,11 @@ mod tests {
             "/operations",
             "/trends",
             "/diagnostics",
+            "/equipment",
             "/api/dashboard",
             "/api/trends",
             "/api/diagnostics",
+            "/api/equipment-values?pointSlices=7",
         ] {
             let response = call(&app, request(Method::GET, path, None, None)).await;
             assert_eq!(

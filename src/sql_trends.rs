@@ -19,6 +19,9 @@ const SQL_KEYCHAIN_ACCOUNT: &str = "trend-source";
 const MAX_TREND_ROWS: usize = 5_000;
 const MAX_POINT_ROWS: usize = 10_000;
 const MAX_SELECTED_POINTS: usize = 8;
+pub const MAX_LIVE_POINT_VALUES: usize = 128;
+pub const LIVE_VALUE_REFRESH_SECONDS: u64 = 15;
+pub const LIVE_VALUE_LOOKBACK_HOURS: i64 = 24 * 30;
 const MAX_TREND_HOURS: i64 = 24 * 365 * 10;
 const LEGACY_HELPER_TIMEOUT_SECONDS: u64 = 40;
 const LEGACY_ZONE_ONLY_FILTER: &str = "p.PointName LIKE '%.ZN-T.#85'";
@@ -352,6 +355,24 @@ pub struct TrendResponse {
     pub series: Vec<TrendSeries>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LivePointValue {
+    pub point_slice_id: i32,
+    pub timestamp: DateTime<Utc>,
+    pub value: f64,
+    pub unit: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LivePointValuesResponse {
+    pub generated_at: DateTime<Utc>,
+    pub refresh_interval_seconds: u64,
+    pub lookback_hours: i64,
+    pub values: Vec<LivePointValue>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SampleRow {
@@ -548,22 +569,7 @@ pub async fn fetch_trends_window(
         .unwrap_or(&settings.query);
     validate_read_only_query(query)?;
 
-    let (rows, truncated) = if settings.legacy_tls {
-        match run_legacy_helper(LegacyRequest::Query {
-            connection: legacy_connection(settings),
-            password: read_sql_password()?,
-            query,
-            from,
-            to,
-        })
-        .await?
-        {
-            LegacyResponse::Samples { rows, truncated } => (rows, truncated),
-            _ => bail!("legacy SQL helper returned an unexpected trend-query response"),
-        }
-    } else {
-        fetch_rows_modern(settings, query, from, to).await?
-    };
+    let (rows, truncated) = fetch_sample_rows(settings, query, from, to).await?;
 
     let bucket_seconds = selected_query.as_ref().map(|(_, seconds)| *seconds);
     Ok(group_rows(
@@ -574,6 +580,80 @@ pub async fn fetch_trends_window(
         bucket_seconds,
         bucket_seconds.map(|_| "mean"),
     ))
+}
+
+pub async fn fetch_live_point_values(
+    settings: &SqlTrendSettings,
+    point_slice_ids: &[i32],
+) -> Result<LivePointValuesResponse> {
+    settings.validate()?;
+    if !settings.enabled {
+        bail!("SQL trend source is disabled");
+    }
+    let point_slice_ids = validate_live_point_slice_ids(point_slice_ids)?;
+    if point_slice_ids.is_empty() {
+        bail!("select at least one historian point");
+    }
+    let query = latest_point_values_query(&point_slice_ids)?;
+    validate_read_only_query(&query)?;
+    let to = Utc::now();
+    let from = to - Duration::hours(LIVE_VALUE_LOOKBACK_HOURS);
+    let (rows, truncated) = fetch_sample_rows(settings, &query, from, to).await?;
+    if truncated {
+        bail!("latest-value query exceeded its bounded result size");
+    }
+
+    let requested = point_slice_ids.into_iter().collect::<BTreeSet<_>>();
+    let mut values = Vec::with_capacity(rows.len());
+    for row in rows {
+        let point_slice_id = row
+            .point_name
+            .parse::<i32>()
+            .context("latest-value query returned an invalid point identifier")?;
+        if !requested.contains(&point_slice_id) {
+            bail!("latest-value query returned an unrequested point identifier");
+        }
+        if !row.sample_value.is_finite() {
+            bail!("latest-value query returned a non-finite value");
+        }
+        values.push(LivePointValue {
+            point_slice_id,
+            timestamp: row.sample_time,
+            value: row.sample_value,
+            unit: row.unit,
+        });
+    }
+    values.sort_by_key(|value| value.point_slice_id);
+
+    Ok(LivePointValuesResponse {
+        generated_at: Utc::now(),
+        refresh_interval_seconds: LIVE_VALUE_REFRESH_SECONDS,
+        lookback_hours: LIVE_VALUE_LOOKBACK_HOURS,
+        values,
+    })
+}
+
+async fn fetch_sample_rows(
+    settings: &SqlTrendSettings,
+    query: &str,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<(Vec<SampleRow>, bool)> {
+    if settings.legacy_tls {
+        return match run_legacy_helper(LegacyRequest::Query {
+            connection: legacy_connection(settings),
+            password: read_sql_password()?,
+            query,
+            from,
+            to,
+        })
+        .await?
+        {
+            LegacyResponse::Samples { rows, truncated } => Ok((rows, truncated)),
+            _ => bail!("legacy SQL helper returned an unexpected trend-query response"),
+        };
+    }
+    fetch_rows_modern(settings, query, from, to).await
 }
 
 async fn fetch_rows_modern(
@@ -825,6 +905,11 @@ fn legacy_connection(settings: &SqlTrendSettings) -> LegacyConnection<'_> {
 }
 
 fn read_sql_password() -> Result<String> {
+    if let Ok(password) = std::env::var("METASYS_SQL_PASSWORD")
+        && !password.is_empty()
+    {
+        return Ok(password);
+    }
     sql_keychain_entry()?
         .get_password()
         .context("SQL Server password is missing; save it from SQL Trend Settings")
@@ -909,6 +994,45 @@ ORDER BY bucketed_values.sample_time ASC"#
     ))
 }
 
+fn latest_point_values_query(point_slice_ids: &[i32]) -> Result<String> {
+    let point_slice_ids = validate_live_point_slice_ids(point_slice_ids)?;
+    let ids = point_slice_ids
+        .into_iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    if ids.is_empty() {
+        bail!("select at least one historian point");
+    }
+    Ok(format!(
+        r#"SELECT
+    CAST(ps.PointSliceID AS nvarchar(32)) AS point_name,
+    latest.sample_time,
+    CAST(latest.sample_value AS float) AS sample_value,
+    CAST(COALESCE(NULLIF(u.DisplayNameShort, ''), u.UnitOfMeasureName) AS nvarchar(64)) AS unit
+FROM dbo.tblPointSlice AS ps
+JOIN dbo.tblPoint AS p ON p.PointID = ps.PointID
+LEFT JOIN dbo.tblUnitOfMeasure AS u ON u.UnitOfMeasureID = p.UnitOfMeasureID
+CROSS APPLY (
+    SELECT TOP (1)
+        source_values.sample_time,
+        source_values.sample_value
+    FROM (
+        SELECT UTCDateTime AS sample_time, CAST(ActualValue AS float) AS sample_value
+        FROM dbo.tblActualValueFloat
+        WHERE PointSliceID = ps.PointSliceID AND UTCDateTime >= @P1 AND UTCDateTime <= @P2
+        UNION ALL
+        SELECT UTCDateTime AS sample_time, CAST(ActualValue AS float) AS sample_value
+        FROM dbo.tblActualValueDigital
+        WHERE PointSliceID = ps.PointSliceID AND UTCDateTime >= @P1 AND UTCDateTime <= @P2
+    ) AS source_values
+    ORDER BY source_values.sample_time DESC
+) AS latest
+WHERE ps.PointSliceID IN ({ids})
+ORDER BY ps.PointSliceID"#
+    ))
+}
+
 fn validate_trend_window(from: DateTime<Utc>, to: DateTime<Utc>) -> Result<i64> {
     let range_seconds = (to - from).num_seconds();
     if range_seconds < 1 {
@@ -921,13 +1045,24 @@ fn validate_trend_window(from: DateTime<Utc>, to: DateTime<Utc>) -> Result<i64> 
 }
 
 fn validate_point_slice_ids(point_slice_ids: &[i32]) -> Result<Vec<i32>> {
+    validate_point_slice_ids_with_limit(point_slice_ids, MAX_SELECTED_POINTS)
+}
+
+fn validate_live_point_slice_ids(point_slice_ids: &[i32]) -> Result<Vec<i32>> {
+    validate_point_slice_ids_with_limit(point_slice_ids, MAX_LIVE_POINT_VALUES)
+}
+
+fn validate_point_slice_ids_with_limit(
+    point_slice_ids: &[i32],
+    maximum: usize,
+) -> Result<Vec<i32>> {
     let unique = point_slice_ids
         .iter()
         .copied()
         .filter(|value| *value > 0)
         .collect::<BTreeSet<_>>();
-    if unique.len() > MAX_SELECTED_POINTS {
-        bail!("select no more than {MAX_SELECTED_POINTS} historian points");
+    if unique.len() > maximum {
+        bail!("select no more than {maximum} historian points");
     }
     if unique.len() != point_slice_ids.len() {
         bail!("historian point selections must be unique positive identifiers");
@@ -1031,8 +1166,9 @@ fn validate_read_only_query(query: &str) -> Result<()> {
 mod tests {
     use super::{
         DEFAULT_HVAC_FILTER, LEGACY_ZONE_ONLY_FILTER, SampleRow, SqlTrendSettings, group_rows,
-        selected_point_query, trend_point_metadata, validate_point_slice_ids,
-        validate_read_only_query, validate_trend_window,
+        latest_point_values_query, selected_point_query, trend_point_metadata,
+        validate_live_point_slice_ids, validate_point_slice_ids, validate_read_only_query,
+        validate_trend_window,
     };
     use chrono::{Duration, TimeZone, Utc};
 
@@ -1081,6 +1217,19 @@ mod tests {
         assert!(validate_point_slice_ids(&[1, 1]).is_err());
         assert!(validate_point_slice_ids(&[0]).is_err());
         assert!(validate_point_slice_ids(&[1, 2, 3, 4, 5, 6, 7, 8, 9]).is_err());
+    }
+
+    #[test]
+    fn latest_value_query_is_read_only_bounded_and_uses_identifiers() {
+        let query = latest_point_values_query(&[42, 7]).unwrap();
+        validate_read_only_query(&query).unwrap();
+        assert!(query.contains("ps.PointSliceID IN (7,42)"));
+        assert!(query.contains("SELECT TOP (1)"));
+        assert!(query.contains("ORDER BY source_values.sample_time DESC"));
+        assert!(query.contains("UTCDateTime >= @P1 AND UTCDateTime <= @P2"));
+        assert!(validate_live_point_slice_ids(&[1, 1]).is_err());
+        assert!(validate_live_point_slice_ids(&[0]).is_err());
+        assert!(validate_live_point_slice_ids(&(1..=129).collect::<Vec<_>>()).is_err());
     }
 
     #[test]
