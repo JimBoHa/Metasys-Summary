@@ -11,8 +11,9 @@ use serde::Deserialize;
 use serde_json::json;
 use tower_http::trace::TraceLayer;
 
-use crate::app::AppState;
-use crate::sql_trends::SqlTrendSettingsUpdate;
+use crate::{
+    app::AppState, email_reports::EmailReportSettingsUpdate, sql_trends::SqlTrendSettingsUpdate,
+};
 
 const INDEX_HTML: &str = include_str!("../static/index.html");
 const APP_JS: &str = include_str!("../static/app.js");
@@ -26,6 +27,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/dashboard", get(dashboard))
         .route("/api/health", get(health))
         .route("/api/refresh", post(refresh))
+        .route(
+            "/api/settings/reports",
+            get(report_settings).put(update_report_settings),
+        )
+        .route("/api/settings/reports/test", post(test_report_settings))
+        .route("/api/reports/send", post(send_report_now))
         .route(
             "/api/settings/sql",
             get(sql_settings).put(update_sql_settings),
@@ -68,6 +75,53 @@ async fn refresh(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         StatusCode::ACCEPTED,
         Json(json!({"status": "refresh scheduled"})),
     )
+}
+
+async fn report_settings(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<crate::email_reports::EmailReportSettingsView>, ApiError> {
+    require_local(peer)?;
+    state
+        .email_report_settings()
+        .map(Json)
+        .map_err(ApiError::from)
+}
+
+async fn update_report_settings(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AppState>>,
+    Json(update): Json<EmailReportSettingsUpdate>,
+) -> Result<Json<crate::email_reports::EmailReportSettingsView>, ApiError> {
+    require_local(peer)?;
+    state
+        .update_email_report_settings(update)
+        .map(Json)
+        .map_err(ApiError::bad_request)
+}
+
+async fn test_report_settings(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_local(peer)?;
+    state
+        .test_email_report_connection()
+        .await
+        .map_err(ApiError::bad_gateway)?;
+    Ok(Json(json!({"status": "connected"})))
+}
+
+async fn send_report_now(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<crate::email_reports::EmailDeliveryResult>, ApiError> {
+    require_local(peer)?;
+    state
+        .send_email_report_now()
+        .await
+        .map(Json)
+        .map_err(ApiError::bad_gateway)
 }
 
 async fn sql_settings(

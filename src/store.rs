@@ -4,7 +4,15 @@ use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::{models::AlarmRecord, sql_trends::SqlTrendSettings};
+use crate::{
+    email_reports::EmailReportSettings, models::AlarmRecord, sql_trends::SqlTrendSettings,
+};
+
+pub struct ReportDeliveryStatus {
+    pub last_attempt_at: Option<DateTime<Utc>>,
+    pub last_success_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+}
 
 pub struct Store {
     connection: Mutex<Connection>,
@@ -55,6 +63,13 @@ impl Store {
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL,
                     updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS report_delivery_log (
+                    attempted_at TEXT PRIMARY KEY,
+                    succeeded INTEGER NOT NULL,
+                    recipient_count INTEGER NOT NULL,
+                    error_message TEXT
                 );
                 "#,
             )
@@ -197,6 +212,41 @@ impl Store {
         let cutoff = (Utc::now() - Duration::days(retention_days.max(31))).to_rfc3339();
         connection.execute("DELETE FROM alarms WHERE occurred_at < ?1", [&cutoff])?;
         connection.execute("DELETE FROM poll_log WHERE attempted_at < ?1", [&cutoff])?;
+        connection.execute(
+            "DELETE FROM report_delivery_log WHERE attempted_at < ?1",
+            [&cutoff],
+        )?;
+        Ok(())
+    }
+
+    pub fn email_report_settings(&self) -> Result<EmailReportSettings> {
+        let connection = self.lock()?;
+        let value: Option<String> = connection
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'email_reports'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        value
+            .map(|value| serde_json::from_str(&value).context("decode email report settings"))
+            .transpose()
+            .map(Option::unwrap_or_default)
+    }
+
+    pub fn save_email_report_settings(&self, settings: &EmailReportSettings) -> Result<()> {
+        let connection = self.lock()?;
+        let value = serde_json::to_string(settings).context("encode email report settings")?;
+        connection.execute(
+            r#"
+            INSERT INTO app_settings (key, value, updated_at)
+            VALUES ('email_reports', ?1, ?2)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            "#,
+            params![value, Utc::now().to_rfc3339()],
+        )?;
         Ok(())
     }
 
@@ -231,6 +281,65 @@ impl Store {
         Ok(())
     }
 
+    pub fn record_report_delivery(
+        &self,
+        succeeded: bool,
+        recipient_count: usize,
+        error_message: Option<&str>,
+    ) -> Result<()> {
+        let connection = self.lock()?;
+        connection.execute(
+            r#"
+            INSERT INTO report_delivery_log (
+                attempted_at, succeeded, recipient_count, error_message
+            ) VALUES (?1, ?2, ?3, ?4)
+            "#,
+            params![
+                Utc::now().to_rfc3339(),
+                succeeded,
+                recipient_count as i64,
+                error_message.map(|message| message.chars().take(1_000).collect::<String>()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn report_delivery_status(&self) -> Result<ReportDeliveryStatus> {
+        let connection = self.lock()?;
+        let latest: Option<(String, bool, Option<String>)> = connection
+            .query_row(
+                r#"
+                SELECT attempted_at, succeeded, error_message
+                FROM report_delivery_log
+                ORDER BY attempted_at DESC
+                LIMIT 1
+                "#,
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let last_success: Option<String> = connection
+            .query_row(
+                "SELECT MAX(attempted_at) FROM report_delivery_log WHERE succeeded = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let (last_attempt_at, last_error) = latest
+            .map(|(timestamp, succeeded, error)| {
+                (
+                    parse_stored_datetime(&timestamp),
+                    if succeeded { None } else { error },
+                )
+            })
+            .unwrap_or((None, None));
+        Ok(ReportDeliveryStatus {
+            last_attempt_at,
+            last_success_at: last_success.and_then(|value| parse_stored_datetime(&value)),
+            last_error,
+        })
+    }
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         self.connection
             .lock()
@@ -250,6 +359,12 @@ fn ensure_occurrence_column(connection: &Connection) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+fn parse_stored_datetime(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|value| value.with_timezone(&Utc))
 }
 
 #[cfg(test)]
@@ -288,6 +403,22 @@ mod tests {
             .unwrap();
         assert_eq!(alarms.len(), 1);
         assert_eq!(alarms[0].occurrence_count, 4);
+    }
+
+    #[test]
+    fn stores_report_settings_and_delivery_status() {
+        let directory = tempdir().unwrap();
+        let store = Store::open(&directory.path().join("test.sqlite3")).unwrap();
+        let settings = crate::email_reports::EmailReportSettings::default();
+        store.save_email_report_settings(&settings).unwrap();
+        assert!(!store.email_report_settings().unwrap().enabled);
+        store
+            .record_report_delivery(false, 2, Some("SMTP unavailable"))
+            .unwrap();
+        let status = store.report_delivery_status().unwrap();
+        assert!(status.last_attempt_at.is_some());
+        assert!(status.last_success_at.is_none());
+        assert_eq!(status.last_error.as_deref(), Some("SMTP unavailable"));
     }
 
     #[test]

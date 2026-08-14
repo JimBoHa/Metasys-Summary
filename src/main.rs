@@ -117,6 +117,16 @@ async fn serve(mut config: Config, cli_open_browser: bool) -> Result<()> {
         }
     });
 
+    let report_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            report_state.send_scheduled_email_report().await;
+        }
+    });
+
     let address = (config.bind_address, config.port);
     let listener = TcpListener::bind(address)
         .await
