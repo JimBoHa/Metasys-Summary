@@ -19,7 +19,8 @@ use crate::{
     portal::models::{PortalMapView, PortalUserRecord, TemperatureReading},
     sql_trends::{
         SqlTrendSettingsUpdate, SqlTrendSettingsView, TrendPointCatalog, TrendResponse,
-        clear_sql_password, fetch_trend_points, fetch_trends, set_sql_password, test_connection,
+        clear_sql_password, fetch_trend_points, fetch_trends_window, set_sql_password,
+        test_connection,
     },
     store::Store,
 };
@@ -356,9 +357,15 @@ impl AppState {
         fetch_trend_points(&settings).await
     }
 
-    pub async fn sql_trends(&self, hours: i64, point_slice_ids: &[i32]) -> Result<TrendResponse> {
+    pub async fn sql_trends(
+        &self,
+        from: chrono::DateTime<Utc>,
+        to: chrono::DateTime<Utc>,
+        interval_seconds: Option<i64>,
+        point_slice_ids: &[i32],
+    ) -> Result<TrendResponse> {
         let settings = self.store.sql_trend_settings()?;
-        fetch_trends(&settings, hours, point_slice_ids).await
+        fetch_trends_window(&settings, from, to, interval_seconds, point_slice_ids).await
     }
 
     pub(crate) fn store(&self) -> &Store {

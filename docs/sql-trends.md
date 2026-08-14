@@ -18,15 +18,19 @@ The password is stored in macOS Keychain. Non-secret settings are stored in the 
 
 ## Graphing historian points
 
-On the Operations page:
+Open **Trend analysis** at `/trends` (administrator or operator account):
 
-1. Select **Browse points**.
-2. Search by controller, equipment, point name, or engineering unit.
-3. Select up to eight points.
-4. Choose a range from 24 hours through 5 years.
-5. Select **Load trends**.
+1. Search by controller, equipment, point name, or engineering unit.
+2. Select up to eight points.
+3. Choose a preset or custom range of up to 10 years.
+4. Leave resolution on **Automatic**, or request a specific time bucket.
+5. Select **Graph selected points**.
 
-Queries use the indexed historian `PointSliceID` and UTC timestamp fields. Selected points are time-bucketed across the full requested period, then displayed chronologically. Responses are limited to 5,000 samples. No data is written to SQL Server.
+Queries use the indexed historian `PointSliceID` and UTC timestamp fields. Selected points are averaged into time buckets across the requested period, then displayed chronologically. The server automatically raises an overly fine requested resolution to keep responses within 5,000 samples.
+
+The workspace provides independent scales for unlike engineering units, optional percent-change normalization, display-only moving-mean smoothing, drag-to-zoom, per-series minimum/maximum/average/change/linear-rate statistics, an accessible data table, and CSV export. Exports identify the actual bucket size and aggregation method and contain the unmodified samples returned by SQL.
+
+The interaction model was informed by the open [FarmDashboard trend workspace](https://github.com/mdbro/farm_dashboard). The Metasys implementation is original, dependency-free browser code and does not copy FarmDashboard source.
 
 ## Advanced query
 

@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'">
+  <title>Metasys Trend Analysis</title>
+  <link rel="stylesheet" href="/trends.css">
+  <script src="/trends.js" defer></script>
+</head>
+<body>
+  <header class="trend-topbar">
+    <a class="trend-brand" href="/">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span><small>INFRA / METASYS</small><strong>Trend Analysis</strong></span>
+    </a>
+    <nav aria-label="Operations navigation">
+      <a href="/">Building portal</a>
+      <a href="/operations">Alarm summary</a>
+      <a class="active" href="/trends" aria-current="page">Trends</a>
+    </nav>
+    <div class="account">
+      <span><strong id="user-name">—</strong><small id="user-role">—</small></span>
+      <button id="sign-out-button" type="button">Sign out</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="page-heading">
+      <div>
+        <p class="eyebrow">HISTORIAN WORKSPACE</p>
+        <h1>Explore building trend data</h1>
+        <p>Select up to eight Metasys historian points, choose a time window, and compare their behavior.</p>
+      </div>
+      <div class="source-note"><span>DATA SOURCE</span><strong>Read-only remote SQL</strong><small>No historian data is copied locally</small></div>
+    </section>
+
+    <div id="page-message" class="page-message" role="status" aria-live="polite" hidden></div>
+
+    <section class="workspace">
+      <aside class="point-browser" aria-labelledby="point-browser-title">
+        <header>
+          <div><p class="eyebrow">POINT CATALOG</p><h2 id="point-browser-title">Select data points</h2></div>
+          <span id="catalog-count">Not loaded</span>
+        </header>
+        <div class="point-search-row">
+          <label for="point-search">Search historian points</label>
+          <div><input id="point-search" type="search" autocomplete="off" placeholder="Equipment, sensor, or point name"><button id="reload-points-button" type="button">Reload</button></div>
+        </div>
+        <div id="selected-points" class="selected-points" aria-label="Selected historian points"><p>Select one or more points below.</p></div>
+        <div id="point-results" class="point-results" role="listbox" aria-multiselectable="true" aria-label="Historian point catalog">
+          <p class="empty-state">Loading historian catalog…</p>
+        </div>
+        <footer><span id="result-count">0 shown</span><span>Maximum 8 selected</span></footer>
+      </aside>
+
+      <div class="analysis-column">
+        <section class="control-card" aria-labelledby="controls-title">
+          <header><div><p class="eyebrow">QUERY</p><h2 id="controls-title">Time and display controls</h2></div><button id="load-trends-button" class="primary-button" type="button">Graph selected points</button></header>
+          <div class="controls-grid">
+            <fieldset class="range-fieldset">
+              <legend>Time range</legend>
+              <div id="range-presets" class="range-presets">
+                <button type="button" data-hours="24">24h</button>
+                <button class="active" type="button" data-hours="168">7d</button>
+                <button type="button" data-hours="720">30d</button>
+                <button type="button" data-hours="2160">90d</button>
+                <button type="button" data-hours="8760">1y</button>
+                <button type="button" data-hours="custom">Custom</button>
+              </div>
+            </fieldset>
+            <label>Resolution
+              <select id="trend-interval">
+                <option value="">Automatic</option>
+                <option value="60">1 minute</option>
+                <option value="300">5 minutes</option>
+                <option value="900">15 minutes</option>
+                <option value="3600">1 hour</option>
+                <option value="21600">6 hours</option>
+                <option value="86400">1 day</option>
+              </select>
+              <small id="interval-recommendation">Automatic protects the 5,000-row response limit.</small>
+            </label>
+            <label>Display
+              <select id="display-mode"><option value="units">Engineering units</option><option value="normalized">Percent change from start</option></select>
+              <small>Different units use independent scales.</small>
+            </label>
+            <label>Smoothing
+              <select id="smoothing-window"><option value="1">None</option><option value="3">3-sample moving mean</option><option value="5">5-sample moving mean</option><option value="9">9-sample moving mean</option></select>
+              <small>Display-only; export retains returned samples.</small>
+            </label>
+          </div>
+          <div id="custom-range" class="custom-range" hidden>
+            <label>Start<input id="range-start" type="datetime-local"></label>
+            <label>End<input id="range-end" type="datetime-local"></label>
+          </div>
+        </section>
+
+        <section class="chart-card" aria-labelledby="chart-title">
+          <header>
+            <div><p class="eyebrow">ANALYSIS</p><h2 id="chart-title">Trend chart</h2><p id="query-summary">Select points and run a query.</p></div>
+            <div class="chart-actions">
+              <button id="reset-zoom-button" type="button" disabled>Reset zoom</button>
+              <button id="toggle-table-button" type="button" disabled>Show data table</button>
+              <button id="export-csv-button" type="button" disabled>Export CSV</button>
+            </div>
+          </header>
+          <div id="chart-legend" class="chart-legend"></div>
+          <div id="chart-stage" class="chart-stage">
+            <canvas id="trend-chart" role="img" aria-label="Selected Metasys historian trend series"></canvas>
+            <div id="chart-placeholder" class="chart-placeholder">No trend data loaded</div>
+            <div id="chart-tooltip" class="chart-tooltip" hidden></div>
+            <div id="zoom-selection" class="zoom-selection" hidden></div>
+          </div>
+          <p class="chart-help">Drag across the plot to zoom. Move over the chart to compare values at a point in time.</p>
+          <div id="data-table-wrap" class="data-table-wrap" hidden>
+            <table>
+              <thead><tr><th>Timestamp</th><th>Point</th><th>Value</th><th>Unit</th></tr></thead>
+              <tbody id="data-table-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="statistics-card" aria-labelledby="statistics-title">
+          <header><div><p class="eyebrow">SUMMARY</p><h2 id="statistics-title">Series statistics</h2></div><span>Calculated on returned SQL samples</span></header>
+          <div id="statistics-grid" class="statistics-grid"><p class="empty-state">Statistics appear after a query.</p></div>
+        </section>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

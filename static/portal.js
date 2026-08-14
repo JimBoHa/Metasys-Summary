@@ -238,6 +238,7 @@ async function enterPortal(session) {
   const isOperator = session.user.role === "operator";
   $("admin-nav").hidden = !isAdmin;
   $("operations-link").hidden = !(isAdmin || isOperator);
+  $("trends-link").hidden = !(isAdmin || isOperator);
   $("admin-metasys-tab").hidden = !isAdmin || !app.localConfigurationAllowed;
   await Promise.all([
     loadMap(),

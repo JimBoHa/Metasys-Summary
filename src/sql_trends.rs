@@ -207,6 +207,19 @@ pub struct TrendSeries {
     pub name: String,
     pub unit: Option<String>,
     pub samples: Vec<TrendSample>,
+    pub statistics: TrendStatistics,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrendStatistics {
+    pub count: usize,
+    pub minimum: Option<f64>,
+    pub maximum: Option<f64>,
+    pub average: Option<f64>,
+    pub latest: Option<f64>,
+    pub change: Option<f64>,
+    pub rate_per_day: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -217,6 +230,8 @@ pub struct TrendResponse {
     pub to: DateTime<Utc>,
     pub sample_count: usize,
     pub truncated: bool,
+    pub bucket_seconds: Option<i64>,
+    pub aggregation: Option<&'static str>,
     pub series: Vec<TrendSeries>,
 }
 
@@ -379,18 +394,38 @@ pub async fn fetch_trends(
     hours: i64,
     point_slice_ids: &[i32],
 ) -> Result<TrendResponse> {
+    let hours = hours.clamp(1, MAX_TREND_HOURS);
+    let to = Utc::now();
+    let from = to - Duration::hours(hours);
+    fetch_trends_window(settings, from, to, None, point_slice_ids).await
+}
+
+pub async fn fetch_trends_window(
+    settings: &SqlTrendSettings,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    requested_bucket_seconds: Option<i64>,
+    point_slice_ids: &[i32],
+) -> Result<TrendResponse> {
     settings.validate()?;
     if !settings.enabled {
         bail!("SQL trend source is disabled");
     }
-    let hours = hours.clamp(1, MAX_TREND_HOURS);
-    let to = Utc::now();
-    let from = to - Duration::hours(hours);
+    let range_seconds = validate_trend_window(from, to)?;
     let point_slice_ids = validate_point_slice_ids(point_slice_ids)?;
-    let selected_query = (!point_slice_ids.is_empty())
-        .then(|| selected_point_query(&point_slice_ids, hours))
-        .transpose()?;
-    let query = selected_query.as_deref().unwrap_or(&settings.query);
+    let selected_query = if point_slice_ids.is_empty() {
+        None
+    } else {
+        Some(selected_point_query(
+            &point_slice_ids,
+            range_seconds,
+            requested_bucket_seconds,
+        )?)
+    };
+    let query = selected_query
+        .as_ref()
+        .map(|(query, _)| query.as_str())
+        .unwrap_or(&settings.query);
     validate_read_only_query(query)?;
 
     let (rows, truncated) = if settings.legacy_tls {
@@ -410,7 +445,15 @@ pub async fn fetch_trends(
         fetch_rows_modern(settings, query, from, to).await?
     };
 
-    Ok(group_rows(rows, truncated, from, to))
+    let bucket_seconds = selected_query.as_ref().map(|(_, seconds)| *seconds);
+    Ok(group_rows(
+        rows,
+        truncated,
+        from,
+        to,
+        bucket_seconds,
+        bucket_seconds.map(|_| "mean"),
+    ))
 }
 
 async fn fetch_rows_modern(
@@ -459,6 +502,8 @@ fn group_rows(
     truncated: bool,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
+    bucket_seconds: Option<i64>,
+    aggregation: Option<&'static str>,
 ) -> TrendResponse {
     let sample_count = rows.len();
     let mut grouped: BTreeMap<(String, Option<String>), Vec<TrendSample>> = BTreeMap::new();
@@ -475,10 +520,12 @@ fn group_rows(
         .into_iter()
         .map(|((name, unit), mut samples)| {
             samples.sort_by_key(|sample| sample.timestamp);
+            let statistics = trend_statistics(&samples);
             TrendSeries {
                 name,
                 unit,
                 samples,
+                statistics,
             }
         })
         .collect();
@@ -488,8 +535,68 @@ fn group_rows(
         to,
         sample_count,
         truncated,
+        bucket_seconds,
+        aggregation,
         series,
     }
+}
+
+fn trend_statistics(samples: &[TrendSample]) -> TrendStatistics {
+    if samples.is_empty() {
+        return TrendStatistics {
+            count: 0,
+            minimum: None,
+            maximum: None,
+            average: None,
+            latest: None,
+            change: None,
+            rate_per_day: None,
+        };
+    }
+    let count = samples.len();
+    let minimum = samples.iter().map(|sample| sample.value).reduce(f64::min);
+    let maximum = samples.iter().map(|sample| sample.value).reduce(f64::max);
+    let average = Some(samples.iter().map(|sample| sample.value).sum::<f64>() / count as f64);
+    let latest = samples.last().map(|sample| sample.value);
+    let change = samples
+        .first()
+        .zip(samples.last())
+        .map(|(first, last)| last.value - first.value);
+    let rate_per_day = linear_rate_per_day(samples);
+    TrendStatistics {
+        count,
+        minimum,
+        maximum,
+        average,
+        latest,
+        change,
+        rate_per_day,
+    }
+}
+
+fn linear_rate_per_day(samples: &[TrendSample]) -> Option<f64> {
+    if samples.len() < 2 {
+        return None;
+    }
+    let origin = samples.first()?.timestamp;
+    let count = samples.len() as f64;
+    let (sum_x, sum_y, sum_xy, sum_x_squared) = samples.iter().fold(
+        (0.0, 0.0, 0.0, 0.0),
+        |(sum_x, sum_y, sum_xy, sum_x_squared), sample| {
+            let x = (sample.timestamp - origin).num_milliseconds() as f64 / 1_000.0;
+            (
+                sum_x + x,
+                sum_y + sample.value,
+                sum_xy + x * sample.value,
+                sum_x_squared + x * x,
+            )
+        },
+    );
+    let denominator = count * sum_x_squared - sum_x * sum_x;
+    if denominator.abs() <= f64::EPSILON {
+        return None;
+    }
+    Some(((count * sum_xy - sum_x * sum_y) / denominator) * 86_400.0)
 }
 
 async fn connect(
@@ -620,7 +727,11 @@ WHERE ps.IsRawData = 1
 ORDER BY p.PointName"#
 }
 
-fn selected_point_query(point_slice_ids: &[i32], hours: i64) -> Result<String> {
+fn selected_point_query(
+    point_slice_ids: &[i32],
+    range_seconds: i64,
+    requested_bucket_seconds: Option<i64>,
+) -> Result<(String, i64)> {
     let point_slice_ids = validate_point_slice_ids(point_slice_ids)?;
     let point_count = point_slice_ids.len();
     let ids = point_slice_ids
@@ -632,11 +743,16 @@ fn selected_point_query(point_slice_ids: &[i32], hours: i64) -> Result<String> {
         bail!("select at least one historian point");
     }
     let buckets_per_series = (MAX_TREND_ROWS / point_count).saturating_sub(1).max(1);
-    let range_seconds = hours.clamp(1, MAX_TREND_HOURS) * 60 * 60;
-    let bucket_seconds =
+    let minimum_bucket_seconds =
         ((range_seconds + buckets_per_series as i64 - 1) / buckets_per_series as i64).max(1);
-    Ok(format!(
-        r#"WITH source_values AS (
+    let requested_bucket_seconds = requested_bucket_seconds.unwrap_or(minimum_bucket_seconds);
+    if !(1..=MAX_TREND_HOURS * 60 * 60).contains(&requested_bucket_seconds) {
+        bail!("trend interval must be between 1 second and 10 years");
+    }
+    let bucket_seconds = requested_bucket_seconds.max(minimum_bucket_seconds);
+    Ok((
+        format!(
+            r#"WITH source_values AS (
         SELECT PointSliceID, UTCDateTime, CAST(ActualValue AS float) AS sample_value
         FROM dbo.tblActualValueFloat
         WHERE PointSliceID IN ({ids}) AND UTCDateTime >= @P1 AND UTCDateTime <= @P2
@@ -668,7 +784,20 @@ JOIN dbo.tblPointSlice AS ps ON ps.PointSliceID = bucketed_values.PointSliceID
 JOIN dbo.tblPoint AS p ON p.PointID = ps.PointID
 LEFT JOIN dbo.tblUnitOfMeasure AS u ON u.UnitOfMeasureID = p.UnitOfMeasureID
 ORDER BY bucketed_values.sample_time ASC"#
+        ),
+        bucket_seconds,
     ))
+}
+
+fn validate_trend_window(from: DateTime<Utc>, to: DateTime<Utc>) -> Result<i64> {
+    let range_seconds = (to - from).num_seconds();
+    if range_seconds < 1 {
+        bail!("trend start must be before trend end");
+    }
+    if range_seconds > MAX_TREND_HOURS * 60 * 60 {
+        bail!("trend range cannot exceed 10 years");
+    }
+    Ok(range_seconds)
 }
 
 fn validate_point_slice_ids(point_slice_ids: &[i32]) -> Result<Vec<i32>> {
@@ -781,8 +910,10 @@ fn validate_read_only_query(query: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        SqlTrendSettings, selected_point_query, validate_point_slice_ids, validate_read_only_query,
+        SampleRow, SqlTrendSettings, group_rows, selected_point_query, validate_point_slice_ids,
+        validate_read_only_query, validate_trend_window,
     };
+    use chrono::{Duration, TimeZone, Utc};
 
     #[test]
     fn default_settings_query_is_valid() {
@@ -819,14 +950,63 @@ mod tests {
 
     #[test]
     fn selected_point_query_is_bounded_and_parameterized() {
-        let query = selected_point_query(&[42, 7], 24 * 365).unwrap();
+        let (query, bucket_seconds) =
+            selected_point_query(&[42, 7], 24 * 365 * 60 * 60, Some(60)).unwrap();
         validate_read_only_query(&query).unwrap();
         assert!(query.contains("PointSliceID IN (7,42)"));
         assert!(query.contains("AVG(sample_value)"));
         assert!(query.contains("DATEDIFF(SECOND, @P1, UTCDateTime)"));
+        assert!(bucket_seconds > 60);
         assert!(validate_point_slice_ids(&[1, 1]).is_err());
         assert!(validate_point_slice_ids(&[0]).is_err());
         assert!(validate_point_slice_ids(&[1, 2, 3, 4, 5, 6, 7, 8, 9]).is_err());
+    }
+
+    #[test]
+    fn trend_window_rejects_reversed_and_excessive_ranges() {
+        let now = Utc::now();
+        assert!(validate_trend_window(now, now).is_err());
+        assert!(validate_trend_window(now, now - Duration::seconds(1)).is_err());
+        assert!(validate_trend_window(now - Duration::days(365 * 11), now).is_err());
+        assert_eq!(
+            validate_trend_window(now - Duration::hours(24), now).unwrap(),
+            86_400
+        );
+    }
+
+    #[test]
+    fn response_includes_statistics_and_linear_rate() {
+        let from = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let to = from + Duration::days(2);
+        let rows = vec![
+            SampleRow {
+                point_name: "Zone temperature".to_owned(),
+                sample_time: from,
+                sample_value: 68.0,
+                unit: Some("deg F".to_owned()),
+            },
+            SampleRow {
+                point_name: "Zone temperature".to_owned(),
+                sample_time: from + Duration::days(1),
+                sample_value: 70.0,
+                unit: Some("deg F".to_owned()),
+            },
+            SampleRow {
+                point_name: "Zone temperature".to_owned(),
+                sample_time: to,
+                sample_value: 72.0,
+                unit: Some("deg F".to_owned()),
+            },
+        ];
+        let response = group_rows(rows, false, from, to, Some(300), Some("mean"));
+        let statistics = &response.series[0].statistics;
+        assert_eq!(statistics.count, 3);
+        assert_eq!(statistics.minimum, Some(68.0));
+        assert_eq!(statistics.maximum, Some(72.0));
+        assert_eq!(statistics.average, Some(70.0));
+        assert_eq!(statistics.latest, Some(72.0));
+        assert_eq!(statistics.change, Some(4.0));
+        assert!((statistics.rate_per_day.unwrap() - 2.0).abs() < 1e-9);
     }
 
     #[test]
