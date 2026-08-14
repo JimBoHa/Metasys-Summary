@@ -11,7 +11,7 @@ use super::{
 };
 use crate::{
     config::Config,
-    models::{AlarmRecord, OverrideRecord, PollData},
+    models::{AlarmRecord, FeedStatus, OverrideRecord, PointExceptionRecord, PollData},
     portal::models::TemperatureReading,
 };
 
@@ -86,12 +86,33 @@ pub async fn fetch(http: &Client, config: &Config, token: &str, version: &str) -
         .filter(|alarm| alarm.active)
         .cloned()
         .collect();
-    let overrides = fetch_overrides(http, config, token, version)
-        .await
-        .unwrap_or_else(|error| {
+    let (overrides, exception_feed) = match fetch_overrides(http, config, token, version).await {
+        Ok(overrides) => {
+            let status =
+                FeedStatus::available("REST point-status override scan completed", overrides.len());
+            (overrides, status)
+        }
+        Err(error) => {
             tracing::warn!(error = %error, "Metasys override scan failed; alarm data remains available");
-            Vec::new()
-        });
+            (
+                Vec::new(),
+                FeedStatus::unavailable(format!("REST point-status scan failed: {error}")),
+            )
+        }
+    };
+    let point_exceptions = overrides
+        .iter()
+        .map(|record| PointExceptionRecord {
+            object_id: record.object_id.clone(),
+            equipment: record.equipment.clone(),
+            point: record.point.clone(),
+            value: record.value.clone(),
+            status: record.status.clone(),
+            status_id: None,
+            kind: "override".to_owned(),
+            expires_at: record.expires_at,
+        })
+        .collect();
 
     Ok(PollData {
         connector: format!("REST {version}"),
@@ -99,6 +120,8 @@ pub async fn fetch(http: &Client, config: &Config, token: &str, version: &str) -
         alarms,
         active_alarms,
         overrides,
+        point_exceptions,
+        exception_feed,
     })
 }
 
@@ -399,7 +422,7 @@ fn parse_alarm(value: &Value, source: &str) -> AlarmRecord {
     let discarded = status.eq_ignore_ascii_case("discarded")
         || first_bool(value, &["/isDiscarded", "/IsDiscarded"]).unwrap_or(false);
     let active = !discarded && !is_normal_alarm_type(&alarm_type);
-    let equipment = first_string(
+    let server_equipment = first_string(
         value,
         &[
             "/equipment/0/equipmentName",
@@ -408,8 +431,19 @@ fn parse_alarm(value: &Value, source: &str) -> AlarmRecord {
             "/Equipment/0/EquipmentName",
             "/Equipment/0/Name",
         ],
-    )
-    .unwrap_or_else(|| equipment_from_reference(value, &point));
+    );
+    let (equipment, equipment_origin) = match server_equipment {
+        Some(equipment) => (equipment, "server".to_owned()),
+        None => {
+            let inferred = equipment_from_reference(value, &point);
+            let origin = if inferred == "Unmapped equipment" {
+                "unknown"
+            } else {
+                "inferred"
+            };
+            (inferred, origin.to_owned())
+        }
+    };
     let message = first_string(
         value,
         &[
@@ -431,6 +465,7 @@ fn parse_alarm(value: &Value, source: &str) -> AlarmRecord {
         id,
         object_id,
         equipment,
+        equipment_origin,
         point,
         message,
         alarm_type,
@@ -464,6 +499,7 @@ fn parse_alarm(value: &Value, source: &str) -> AlarmRecord {
             || first_bool(value, &["/isAcknowledged", "/IsAcknowledged"]).unwrap_or(false),
         occurrence_count: 1,
         source: source.to_owned(),
+        last_seen_at: None,
     }
 }
 

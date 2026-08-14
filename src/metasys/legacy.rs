@@ -11,7 +11,10 @@ use super::{
 };
 use crate::{
     config::Config,
-    models::{AlarmRecord, OverrideRecord, PollData},
+    models::{
+        AlarmRecord, FeedStatus, OverrideRecord, PointExceptionRecord, PollData,
+        infer_equipment_name,
+    },
     portal::models::TemperatureReading,
 };
 
@@ -72,12 +75,15 @@ pub async fn login(http: &Client, config: &Config) -> Result<AuthSession> {
     })
 }
 
-pub async fn fetch(http: &Client, config: &Config, token: &str) -> Result<PollData> {
-    let current = fetch_alarm_set(http, config, token, None).await?;
+pub async fn fetch(http: &Client, config: &Config, session: &AuthSession) -> Result<PollData> {
+    let token = &session.token;
+    let authorization_data = session.authorization_data.as_deref();
+    let current = fetch_alarm_set(http, config, token, authorization_data, None).await?;
     let history = fetch_alarm_set(
         http,
         config,
         token,
+        authorization_data,
         Some(Utc::now() - Duration::days(config.history_days)),
     )
     .await
@@ -92,13 +98,47 @@ pub async fn fetch(http: &Client, config: &Config, token: &str) -> Result<PollDa
         .into_iter()
         .filter(|alarm| alarm.active)
         .collect::<Vec<_>>();
-    let overrides = fetch_overrides(http, config, token)
-        .await
-        .unwrap_or_else(|error| {
+    let (point_exceptions, exception_feed) = match fetch_problem_areas(
+        http,
+        config,
+        token,
+        authorization_data,
+    )
+    .await
+    {
+        Ok(records) => {
+            let status = FeedStatus::available(
+                "Legacy equipment-not-normal feed is available",
+                records.len(),
+            );
+            (records, status)
+        }
+        Err(error) => {
             tracing::warn!(error = %error, "legacy override scan failed; alarm data remains available");
-            Vec::new()
-        });
-    let server_version = fetch_version(http, config, token).await.ok();
+            (
+                Vec::new(),
+                FeedStatus::unavailable(format!(
+                    "Legacy equipment-not-normal feed failed: {error}"
+                )),
+            )
+        }
+    };
+    let overrides = point_exceptions
+        .iter()
+        .filter(|record| record.kind == "override")
+        .map(|record| OverrideRecord {
+            object_id: record.object_id.clone(),
+            equipment: record.equipment.clone(),
+            point: record.point.clone(),
+            value: record.value.clone(),
+            status: record.status.clone(),
+            started_at: None,
+            expires_at: record.expires_at,
+        })
+        .collect();
+    let server_version = fetch_version(http, config, token, authorization_data)
+        .await
+        .ok();
 
     Ok(PollData {
         connector: "Legacy Metasys UI".to_owned(),
@@ -106,6 +146,8 @@ pub async fn fetch(http: &Client, config: &Config, token: &str) -> Result<PollDa
         alarms,
         active_alarms,
         overrides,
+        point_exceptions,
+        exception_feed,
     })
 }
 
@@ -542,6 +584,7 @@ async fn fetch_alarm_set(
     http: &Client,
     config: &Config,
     token: &str,
+    authorization_data: Option<&str>,
     start: Option<chrono::DateTime<Utc>>,
 ) -> Result<Vec<AlarmRecord>> {
     let url = format!("{}/UI/api/AlarmManagerService/GetAlarms", config.server_url);
@@ -566,7 +609,7 @@ async fn fetch_alarm_set(
         "SortOrder": "DESC",
         "IsDesktop": true
     });
-    let response = authorize(http.post(&url), token)
+    let response = authorize_with_data(http.post(&url), token, authorization_data)
         .json(&payload)
         .send()
         .await
@@ -613,11 +656,17 @@ fn parse_alarm(value: &Value) -> AlarmRecord {
         &["/ShortNames/0/Name", "/ShortNames/0", "/ItemName", "/Name"],
     )
     .unwrap_or_else(|| "Unknown point".to_owned());
-    let equipment = first_string(
+    let server_equipment = first_string(
         value,
         &["/MappedEquipments/0/Name", "/EquipmentName", "/EquipmentId"],
-    )
-    .unwrap_or_else(|| "Unmapped equipment".to_owned());
+    );
+    let (equipment, equipment_origin) = match server_equipment {
+        Some(equipment) => (equipment, "server".to_owned()),
+        None => match infer_equipment_name(&object_id, &point) {
+            Some(equipment) => (equipment, "inferred".to_owned()),
+            None => ("Unmapped equipment".to_owned(), "unknown".to_owned()),
+        },
+    };
     let message = first_string(
         value,
         &["/Message", "/Description", "/AlarmMessage", "/StatusText"],
@@ -632,6 +681,7 @@ fn parse_alarm(value: &Value) -> AlarmRecord {
         id,
         object_id,
         equipment,
+        equipment_origin,
         point,
         message,
         alarm_type: alarm_type.clone(),
@@ -652,21 +702,23 @@ fn parse_alarm(value: &Value) -> AlarmRecord {
         .unwrap_or(1)
         .max(1),
         source: "legacy-ui".to_owned(),
+        last_seen_at: None,
     }
 }
 
-async fn fetch_overrides(
+async fn fetch_problem_areas(
     http: &Client,
     config: &Config,
     token: &str,
-) -> Result<Vec<OverrideRecord>> {
+    authorization_data: Option<&str>,
+) -> Result<Vec<PointExceptionRecord>> {
     let url = format!("{}/UI/api/EquipmentNotNormal/GetPage", config.server_url);
     let mut snapshot_id = String::new();
     let mut offset = 0_usize;
     let page_size = 250_usize;
     let mut output = Vec::new();
     loop {
-        let response = authorize(http.get(&url), token)
+        let response = authorize_with_data(http.get(&url), token, authorization_data)
             .query(&[
                 ("snapshotId", snapshot_id.as_str()),
                 ("spaceId", "0"),
@@ -701,24 +753,28 @@ async fn fetch_overrides(
             .unwrap_or_default();
         for item in &problem_areas {
             let status_text = first_string(item, &["/StatusText"]).unwrap_or_default();
-            let status_id = first_u64(item, &["/StatusId"]).unwrap_or_default();
-            if status_id == 86 || status_text.to_ascii_lowercase().contains("override") {
-                output.push(OverrideRecord {
-                    object_id: first_string(item, &["/PointId"]).unwrap_or_default(),
-                    equipment: first_string(item, &["/EquipmentName"])
-                        .unwrap_or_else(|| "Unmapped equipment".to_owned()),
-                    point: first_string(item, &["/ShortName", "/Label"])
-                        .unwrap_or_else(|| "Unknown point".to_owned()),
-                    value: value_to_string(item.get("Value")),
-                    status: if status_text.is_empty() {
-                        "Operator Override".to_owned()
-                    } else {
-                        status_text
-                    },
-                    started_at: None,
-                    expires_at: parse_datetime(item.get("StatusExpirationTime")),
-                });
-            }
+            let status_id = first_u64(item, &["/StatusId"]);
+            let object_id = first_string(item, &["/PointId"]).unwrap_or_default();
+            let point = first_string(item, &["/ShortName", "/Label"])
+                .unwrap_or_else(|| "Unknown point".to_owned());
+            let equipment = first_string(item, &["/EquipmentName"])
+                .or_else(|| infer_equipment_name(&object_id, &point))
+                .unwrap_or_else(|| "Unmapped equipment".to_owned());
+            let kind = classify_problem_area(status_id.unwrap_or_default(), &status_text);
+            output.push(PointExceptionRecord {
+                object_id,
+                equipment,
+                point,
+                value: value_to_string(item.get("Value")),
+                status: if status_text.is_empty() {
+                    "Not normal".to_owned()
+                } else {
+                    status_text
+                },
+                status_id,
+                kind,
+                expires_at: parse_datetime(item.get("StatusExpirationTime")),
+            });
         }
         offset += problem_areas.len();
         if problem_areas.is_empty() || offset >= total || offset >= config.max_override_points {
@@ -728,9 +784,32 @@ async fn fetch_overrides(
     Ok(output)
 }
 
-async fn fetch_version(http: &Client, config: &Config, token: &str) -> Result<String> {
+fn classify_problem_area(status_id: u64, status_text: &str) -> String {
+    let status = status_text.to_ascii_lowercase();
+    if status_id == 86 || status.contains("override") {
+        "override"
+    } else if status.contains("offline") || status.contains("communication") {
+        "offline"
+    } else if status.contains("fault") {
+        "fault"
+    } else if status.contains("unreliable") {
+        "unreliable"
+    } else {
+        "notNormal"
+    }
+    .to_owned()
+}
+
+async fn fetch_version(
+    http: &Client,
+    config: &Config,
+    token: &str,
+    authorization_data: Option<&str>,
+) -> Result<String> {
     let url = format!("{}/UI/api/User/About", config.server_url);
-    let response = authorize(http.get(url), token).send().await?;
+    let response = authorize_with_data(http.get(url), token, authorization_data)
+        .send()
+        .await?;
     let body = response.json::<Value>().await?;
     let release = first_string(&body, &["/Results/ReleaseVersion"]);
     let software = first_string(&body, &["/Results/SoftwareVersion"]);
@@ -747,10 +826,6 @@ fn legacy_error(value: &Value) -> String {
         &["/Error/Message", "/Error/Type", "/Message", "/message"],
     )
     .unwrap_or_else(|| "unknown legacy Metasys error".to_owned())
-}
-
-fn authorize(request: RequestBuilder, token: &str) -> RequestBuilder {
-    authorize_with_data(request, token, None)
 }
 
 fn authorize_with_data(
@@ -770,9 +845,12 @@ fn authorize_with_data(
 
 #[cfg(test)]
 mod tests {
+    use reqwest::header;
     use serde_json::json;
 
-    use super::{parse_alarm, parse_signalr_temperature};
+    use super::{
+        authorize_with_data, classify_problem_area, parse_alarm, parse_signalr_temperature,
+    };
 
     #[test]
     fn parses_legacy_alarm_manager_record() {
@@ -817,5 +895,52 @@ mod tests {
         assert_eq!(reading.display_value, "72.4");
         assert_eq!(reading.unit, "deg F");
         assert_eq!(reading.status, "Normal");
+    }
+
+    #[test]
+    fn infers_unmapped_legacy_equipment_from_point_reference() {
+        let alarm = parse_alarm(&json!({
+            "Id": "event-2",
+            "PointReference": "SERVER:NAE/FC-1.TB6-P06",
+            "ShortNames": ["TB6-P06"],
+            "AlarmType": "Alarm",
+            "Priority": 106,
+            "DetectionTime": "2026-08-01T12:00:00Z"
+        }));
+        assert_eq!(alarm.equipment, "TB6-P06");
+        assert_eq!(alarm.equipment_origin, "inferred");
+    }
+
+    #[test]
+    fn legacy_session_cookie_keeps_authorization_data() {
+        let request = authorize_with_data(
+            reqwest::Client::new().get("https://metasys.example.test/UI/api/read"),
+            "test-token",
+            Some("{\"CurrentUserClientId\":\"client-1\"}"),
+        )
+        .build()
+        .unwrap();
+        assert_eq!(
+            request.headers().get(header::AUTHORIZATION).unwrap(),
+            "Bearer test-token"
+        );
+        let cookie = request
+            .headers()
+            .get(header::COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(cookie.contains("BearerToken=test-token"));
+        assert!(cookie.contains("metasysAuthorizationData="));
+        assert!(cookie.contains("CurrentUserClientId"));
+    }
+
+    #[test]
+    fn classifies_problem_area_statuses() {
+        assert_eq!(classify_problem_area(86, ""), "override");
+        assert_eq!(classify_problem_area(0, "Communication Offline"), "offline");
+        assert_eq!(classify_problem_area(0, "Unreliable"), "unreliable");
+        assert_eq!(classify_problem_area(0, "Fault"), "fault");
+        assert_eq!(classify_problem_area(0, "Above Setpoint"), "notNormal");
     }
 }

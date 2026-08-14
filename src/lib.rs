@@ -1,6 +1,7 @@
 pub mod analytics;
 pub mod app;
 pub mod config;
+pub mod diagnostics;
 pub mod email_reports;
 pub mod metasys;
 pub mod models;

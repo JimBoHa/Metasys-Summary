@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'">
+  <title>Metasys System Diagnostics</title>
+  <link rel="stylesheet" href="/navigation.css">
+  <link rel="stylesheet" href="/diagnostics.css">
+  <script src="/navigation.js" defer></script>
+  <script src="/diagnostics.js" defer></script>
+</head>
+<body class="has-sidebar diagnostics-body" data-nav-active="diagnostics">
+  <div class="sidebar-backdrop" data-sidebar-close aria-hidden="true"></div>
+  <aside id="primary-sidebar" class="primary-sidebar" tabindex="-1" aria-label="Application navigation">
+    <a class="sidebar-brand" href="/">
+      <span class="sidebar-brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span class="sidebar-brand-copy"><small>INFRA / METASYS</small><strong>Metasys Summary</strong></span>
+    </a>
+    <nav class="sidebar-nav">
+      <section class="sidebar-group" data-sidebar-group="overview">
+        <button class="sidebar-group-toggle" type="button" aria-expanded="true"><span>Overview</span><span class="sidebar-chevron" aria-hidden="true">›</span></button>
+        <div class="sidebar-group-items">
+          <a class="sidebar-link" data-nav-key="home" href="/#home"><span class="sidebar-link-icon">B</span><span>Building overview</span></a>
+          <a class="sidebar-link" data-nav-key="requests" href="/#requests"><span class="sidebar-link-icon">R</span><span>Service requests</span></a>
+        </div>
+      </section>
+      <section class="sidebar-group" data-sidebar-group="operations" data-sidebar-role="operations" hidden>
+        <button class="sidebar-group-toggle" type="button" aria-expanded="true"><span>Operations</span><span class="sidebar-chevron" aria-hidden="true">›</span></button>
+        <div class="sidebar-group-items">
+          <a class="sidebar-link" data-nav-key="operations" href="/operations"><span class="sidebar-link-icon">!</span><span>Alarm summary</span></a>
+          <a class="sidebar-link" data-nav-key="diagnostics" href="/diagnostics"><span class="sidebar-link-icon">D</span><span>System diagnostics</span></a>
+          <a class="sidebar-link" data-nav-key="trends" href="/trends"><span class="sidebar-link-icon">∿</span><span>Trend analysis</span></a>
+        </div>
+      </section>
+      <section class="sidebar-group" data-sidebar-group="administration" data-sidebar-role="admin" hidden>
+        <button class="sidebar-group-toggle" type="button" aria-expanded="true"><span>Administration</span><span class="sidebar-chevron" aria-hidden="true">›</span></button>
+        <div class="sidebar-group-items">
+          <a class="sidebar-link" data-nav-key="admin-structure" href="/#admin/structure"><span class="sidebar-link-icon">S</span><span>Buildings &amp; floors</span></a>
+          <a class="sidebar-link" data-nav-key="admin-maps" href="/#admin/maps"><span class="sidebar-link-icon">M</span><span>Floor-plan editor</span></a>
+          <a class="sidebar-link" data-nav-key="admin-users" href="/#admin/users"><span class="sidebar-link-icon">U</span><span>Users &amp; access</span></a>
+          <a class="sidebar-link" data-nav-key="admin-metasys" href="/#admin/metasys"><span class="sidebar-link-icon">C</span><span>Metasys connection</span></a>
+          <a class="sidebar-link" data-nav-key="admin-reports" href="/operations#reports"><span class="sidebar-link-icon">E</span><span>Email reports</span></a>
+          <a class="sidebar-link" data-nav-key="admin-sql" href="/operations#sql"><span class="sidebar-link-icon">Q</span><span>SQL trend source</span></a>
+        </div>
+      </section>
+    </nav>
+    <div class="sidebar-account"><span><strong class="sidebar-user-name">Signed in</strong><small class="sidebar-user-role">Account</small></span><button class="sidebar-sign-out" type="button" aria-label="Sign out">↗</button></div>
+  </aside>
+
+  <div class="sidebar-page">
+    <header class="diagnostic-topbar">
+      <button class="sidebar-mobile-toggle" data-sidebar-toggle type="button" aria-controls="primary-sidebar" aria-label="Open navigation"><i aria-hidden="true">☰</i><span>Menu</span></button>
+      <div class="diagnostic-brand">
+        <p>OPERATIONS / READ ONLY</p>
+        <strong>System Diagnostics</strong>
+      </div>
+      <div class="diagnostic-source">
+        <span id="diagnostic-health" class="health-pill starting"><i></i> Connecting</span>
+        <span><b id="diagnostic-connector">Detecting source</b><small id="diagnostic-updated">Waiting for data</small></span>
+        <button id="diagnostic-refresh" class="diagnostic-button" type="button">Refresh data</button>
+      </div>
+    </header>
+
+    <main class="diagnostic-main">
+      <section class="diagnostic-intro">
+        <div>
+          <p class="diagnostic-eyebrow">FAULT FINDING WORKSPACE</p>
+          <h1>Move from symptoms to likely causes</h1>
+          <p>Explore every cached alarm field, current point exception, equipment grouping, time pattern, and connector-health signal available from the read-only Metasys connection.</p>
+        </div>
+        <div class="scope-note"><span>HISTORY</span><strong id="diagnostic-history-scope">Loading…</strong><small>All timestamps display in this browser's local time.</small></div>
+      </section>
+
+      <div id="diagnostic-error" class="diagnostic-error" role="alert" hidden></div>
+
+      <nav class="diagnostic-tabs" role="tablist" aria-label="Diagnostic views">
+        <button id="tab-triage" class="diagnostic-tab active" data-tab-target="triage" type="button" role="tab" aria-selected="true" aria-controls="panel-triage"><span>01</span>Triage</button>
+        <button id="tab-alarms" class="diagnostic-tab" data-tab-target="alarms" type="button" role="tab" aria-selected="false" aria-controls="panel-alarms"><span>02</span>Alarm explorer</button>
+        <button id="tab-equipment" class="diagnostic-tab" data-tab-target="equipment" type="button" role="tab" aria-selected="false" aria-controls="panel-equipment"><span>03</span>Equipment &amp; systems</button>
+        <button id="tab-patterns" class="diagnostic-tab" data-tab-target="patterns" type="button" role="tab" aria-selected="false" aria-controls="panel-patterns"><span>04</span>Patterns</button>
+        <button id="tab-exceptions" class="diagnostic-tab" data-tab-target="exceptions" type="button" role="tab" aria-selected="false" aria-controls="panel-exceptions"><span>05</span>Overrides &amp; exceptions</button>
+        <button id="tab-reliability" class="diagnostic-tab" data-tab-target="reliability" type="button" role="tab" aria-selected="false" aria-controls="panel-reliability"><span>06</span>Reliability &amp; data</button>
+      </nav>
+
+      <section id="panel-triage" class="diagnostic-panel" data-tab-panel="triage" role="tabpanel" aria-labelledby="tab-triage">
+        <div class="diagnostic-metrics" aria-label="Current diagnostic metrics">
+          <article><span>Active alarms</span><strong id="summary-active">—</strong><small id="summary-active-note">Current alarm manager</small></article>
+          <article><span>High unacknowledged</span><strong id="summary-high-unack">—</strong><small>Priority 0–79</small></article>
+          <article><span>Fault / unreliable</span><strong id="summary-fault">—</strong><small>Current sensor or object quality</small></article>
+          <article><span>Offline</span><strong id="summary-offline">—</strong><small>Communication conditions</small></article>
+          <article><span>Current exceptions</span><strong id="summary-exceptions">—</strong><small id="summary-exception-note">Checking feed</small></article>
+          <article><span>Poll success</span><strong id="summary-poll-success">—</strong><small>Rolling seven days</small></article>
+        </div>
+        <div class="triage-grid">
+          <article class="diagnostic-card findings-card">
+            <header><div><p>PRIORITIZED OBSERVATIONS</p><h2>What deserves attention</h2></div><span id="findings-count" class="card-count">0 findings</span></header>
+            <div id="findings-list" class="findings-list"><p class="diagnostic-empty">Analyzing current conditions…</p></div>
+          </article>
+          <article class="diagnostic-card watchlist-card">
+            <header><div><p>ACTIVE WATCHLIST</p><h2>Highest-priority evidence</h2></div><button id="open-all-alarms" class="text-button" type="button">Open explorer →</button></header>
+            <div class="diagnostic-table-wrap">
+              <table class="watchlist-table"><thead><tr><th>Priority</th><th>Equipment / point</th><th>Condition</th><th>Detected</th></tr></thead><tbody id="triage-alarm-body"><tr><td colspan="4" class="diagnostic-empty-cell">Loading alarms…</td></tr></tbody></table>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section id="panel-alarms" class="diagnostic-panel" data-tab-panel="alarms" role="tabpanel" aria-labelledby="tab-alarms" hidden>
+        <article class="diagnostic-card explorer-card">
+          <header class="explorer-heading"><div><p>ALL AVAILABLE ALARM FIELDS</p><h2>Alarm explorer</h2></div><div><span id="alarm-result-count">0 records</span><button id="export-alarms" class="diagnostic-button secondary" type="button">Export filtered CSV</button></div></header>
+          <div class="alarm-filters">
+            <label class="filter-search">Search<input id="alarm-search" type="search" placeholder="Equipment, point, message, object reference…" autocomplete="off"></label>
+            <label>State<select id="alarm-state-filter"><option value="all">All states</option><option value="active">Active</option><option value="returned">Returned / history</option><option value="stale">Active over 24h</option></select></label>
+            <label>Severity<select id="alarm-severity-filter"><option value="all">All severities</option><option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
+            <label>Acknowledgement<select id="alarm-ack-filter"><option value="all">All</option><option value="unacknowledged">Unacknowledged</option><option value="acknowledged">Acknowledged</option></select></label>
+            <label>Type<select id="alarm-type-filter"><option value="all">All types</option></select></label>
+            <label>System<select id="alarm-system-filter"><option value="all">All systems</option></select></label>
+            <button id="clear-alarm-filters" class="diagnostic-button secondary" type="button">Clear filters</button>
+          </div>
+          <div class="diagnostic-table-wrap tall-table">
+            <table class="alarm-explorer-table"><thead><tr><th>State</th><th>Equipment / point</th><th>Condition</th><th>Type / category</th><th>Priority</th><th>Detected</th><th>Ack</th><th>Count</th></tr></thead><tbody id="alarm-explorer-body"><tr><td colspan="8" class="diagnostic-empty-cell">Loading alarm history…</td></tr></tbody></table>
+          </div>
+          <p class="table-footnote">Select any row to inspect its full object reference, source, mapping origin, last-seen time, and event identifier.</p>
+        </article>
+      </section>
+
+      <section id="panel-equipment" class="diagnostic-panel" data-tab-panel="equipment" role="tabpanel" aria-labelledby="tab-equipment" hidden>
+        <div class="equipment-layout">
+          <article class="diagnostic-card equipment-ranking-card">
+            <header><div><p>CORRELATED CONDITIONS</p><h2>Equipment diagnostic ranking</h2></div><label class="inline-search">Filter<input id="equipment-search" type="search" placeholder="Equipment or system" autocomplete="off"></label></header>
+            <div class="diagnostic-table-wrap tall-table"><table class="equipment-table"><thead><tr><th>Equipment</th><th>System</th><th>Points</th><th>Active</th><th>High</th><th>Fault</th><th>Offline</th><th>History</th><th>Score</th></tr></thead><tbody id="equipment-body"><tr><td colspan="9" class="diagnostic-empty-cell">Building equipment groups…</td></tr></tbody></table></div>
+          </article>
+          <aside class="diagnostic-card equipment-detail-card">
+            <header><div><p>SELECTED EQUIPMENT</p><h2 id="equipment-detail-name">Choose a row</h2></div></header>
+            <div id="equipment-detail" class="equipment-detail"><p class="diagnostic-empty">Select equipment to filter related alarms and inspect the dominant condition.</p></div>
+          </aside>
+          <article class="diagnostic-card systems-card">
+            <header><div><p>REFERENCE PATHS</p><h2>Metasys systems / controllers</h2></div><span id="system-count" class="card-count">0 systems</span></header>
+            <div id="systems-grid" class="systems-grid"><p class="diagnostic-empty">Loading system paths…</p></div>
+          </article>
+        </div>
+      </section>
+
+      <section id="panel-patterns" class="diagnostic-panel" data-tab-panel="patterns" role="tabpanel" aria-labelledby="tab-patterns" hidden>
+        <div class="patterns-grid">
+          <article class="diagnostic-card chart-card wide-chart"><header><div><p>EVENT FLOW</p><h2>30-day alarm activity</h2></div><div class="chart-key"><span class="total-key">Total</span><span class="high-key">High priority</span><span class="normal-key">Normal returns</span></div></header><div class="canvas-stage"><canvas id="daily-activity-chart" role="img" aria-label="Daily alarm events, high-priority events, and normal returns"></canvas></div></article>
+          <article class="diagnostic-card chart-card"><header><div><p>SCHEDULE CLUES · UTC</p><h2>Events by hour of day</h2></div></header><div class="canvas-stage"><canvas id="hourly-activity-chart" role="img" aria-label="Alarm event distribution by UTC hour"></canvas></div></article>
+          <article class="diagnostic-card breakdown-card"><header><div><p>CONDITION MIX</p><h2>Alarm types</h2></div></header><div id="alarm-type-breakdown" class="breakdown-list"><p class="diagnostic-empty">Loading types…</p></div></article>
+          <article class="diagnostic-card breakdown-card"><header><div><p>SERVER CLASSIFICATION</p><h2>Categories</h2></div></header><div id="category-breakdown" class="breakdown-list"><p class="diagnostic-empty">Loading categories…</p></div></article>
+          <article class="diagnostic-card breakdown-card"><header><div><p>CONNECTOR ATTRIBUTION</p><h2>Record sources</h2></div></header><div id="source-breakdown" class="breakdown-list"><p class="diagnostic-empty">Loading sources…</p></div></article>
+        </div>
+      </section>
+
+      <section id="panel-exceptions" class="diagnostic-panel" data-tab-panel="exceptions" role="tabpanel" aria-labelledby="tab-exceptions" hidden>
+        <div id="exception-feed-banner" class="feed-banner waiting"><span><i></i><strong id="exception-feed-title">Checking equipment-not-normal feed</strong></span><p id="exception-feed-message">Waiting for current data.</p></div>
+        <div class="exceptions-grid">
+          <article class="diagnostic-card">
+            <header><div><p>OPERATOR INTERVENTIONS</p><h2>Active overrides</h2></div><span id="override-total" class="card-count">0 active</span></header>
+            <div class="diagnostic-table-wrap"><table class="exception-table"><thead><tr><th>Equipment / point</th><th>Value</th><th>Status</th><th>Started</th><th>Expires</th><th>Object reference</th></tr></thead><tbody id="override-body"><tr><td colspan="6" class="diagnostic-empty-cell">Loading overrides…</td></tr></tbody></table></div>
+          </article>
+          <article class="diagnostic-card">
+            <header><div><p>CURRENT NON-NORMAL VALUES</p><h2>All point exceptions</h2></div><div class="exception-filter"><label for="exception-kind-filter">Kind</label><select id="exception-kind-filter"><option value="all">All kinds</option><option value="override">Overrides</option><option value="offline">Offline</option><option value="fault">Fault</option><option value="unreliable">Unreliable</option><option value="notNormal">Other non-normal</option></select></div></header>
+            <div class="diagnostic-table-wrap tall-table"><table class="exception-table"><thead><tr><th>Kind</th><th>Equipment / point</th><th>Current value</th><th>Status</th><th>Status ID</th><th>Expires</th><th>Object reference</th></tr></thead><tbody id="exception-body"><tr><td colspan="7" class="diagnostic-empty-cell">Loading current exceptions…</td></tr></tbody></table></div>
+          </article>
+        </div>
+      </section>
+
+      <section id="panel-reliability" class="diagnostic-panel" data-tab-panel="reliability" role="tabpanel" aria-labelledby="tab-reliability" hidden>
+        <div class="reliability-metrics">
+          <article><span>Seven-day poll success</span><strong id="reliability-success">—</strong><small id="reliability-attempts">No attempts</small></article>
+          <article><span>Average poll duration</span><strong id="reliability-average">—</strong><small>Measured after this update</small></article>
+          <article><span>Maximum poll duration</span><strong id="reliability-maximum">—</strong><small>Slow upstream detector</small></article>
+          <article><span>Server equipment mappings</span><strong id="mapping-percentage">—</strong><small id="mapping-detail">Checking records</small></article>
+          <article><span>Distinct points</span><strong id="quality-points">—</strong><small id="quality-systems">Across system paths</small></article>
+        </div>
+        <div class="reliability-grid">
+          <article class="diagnostic-card chart-card"><header><div><p>CONNECTION BEHAVIOR</p><h2>Poll activity · last 24 hours</h2></div></header><div class="canvas-stage"><canvas id="poll-activity-chart" role="img" aria-label="Metasys poll attempts, failures, and active alarm counts"></canvas></div></article>
+          <article class="diagnostic-card"><header><div><p>UPSTREAM ERRORS</p><h2>Recent poll failures</h2></div><span id="failure-count" class="card-count">0 failures</span></header><div id="poll-failure-list" class="failure-list"><p class="diagnostic-empty">Loading poll history…</p></div></article>
+          <article class="diagnostic-card capabilities-card"><header><div><p>WHAT THIS CONNECTION CAN PROVE</p><h2>Data feed capabilities</h2></div></header><div id="capability-list" class="capability-list"><p class="diagnostic-empty">Inspecting feed coverage…</p></div></article>
+          <article class="diagnostic-card quality-card"><header><div><p>FIELD COMPLETENESS</p><h2>Data quality</h2></div></header><div id="quality-list" class="quality-list"><p class="diagnostic-empty">Calculating completeness…</p></div></article>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="alarm-detail-dialog" class="alarm-detail-dialog">
+    <form method="dialog">
+      <header><div><p>ALARM EVIDENCE</p><h2 id="alarm-detail-title">Alarm detail</h2></div><button id="alarm-detail-close" type="button" aria-label="Close alarm detail">×</button></header>
+      <div id="alarm-detail-content" class="alarm-detail-content"></div>
+      <footer><button class="diagnostic-button" type="submit">Close</button></footer>
+    </form>
+  </dialog>
+</body>
+</html>
