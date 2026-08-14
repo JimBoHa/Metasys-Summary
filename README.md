@@ -81,6 +81,7 @@ The authenticated interface uses a persistent, grouped left sidebar for building
 - Six-tab diagnostic workspace with prioritized findings, full alarm-field search and CSV export, equipment/system correlation, time patterns, current point exceptions, poll reliability, and data-completeness indicators
 - Configurable encrypted email reports with manual, daily, weekday, or weekly delivery
 - Optional Microsoft SQL Server historian workspace with point search, custom ranges, safe aggregation, zoom, statistics, normalization, smoothing, data table, and CSV export
+- Equipment hierarchy with adaptive live historian values: a one-second target for small selections, automatic point-count/query-latency backoff, hidden-tab pause, and failure backoff
 
 Modern Metasys REST versions v2-v6 are auto-detected. REST v5/v6 uses activities; v2-v4 uses alarm collections with version-appropriate filters. The legacy connector uses Alarm Manager for events and Potential Problem Areas for overrides. SQLite deduplicates event IDs across polls, so the local 30-day index improves continuously even when an older Metasys endpoint returns a limited initial history.
 
@@ -105,6 +106,8 @@ Passwords stay in macOS Keychain. Only encrypted SMTP transports are supported: 
 Open **SQL Trends** from a browser on the host Mac. Configure the SQL Server hostname or IP, port, database, read-only username, password, certificate policy, and optional legacy-TLS compatibility. The password is stored only in macOS Keychain; non-secret settings are stored in the dashboard SQLite database. Settings endpoints reject non-loopback clients.
 
 Operators can open `/trends`, load the Metasys historian point catalog, search by equipment or point name, select up to eight points, and graph up to 5,000 samples over preset or custom windows as long as 10 years. The server reports the actual mean-aggregation interval it used. Current Metasys historian tables are queried directly with bounded, parameterized `SELECT` statements. No remote database content is modified; the latest imported-equipment samples are copied into local DuckDB history for analysis.
+
+The equipment hierarchy at `/equipment` refreshes its linked historian values with a one-second target. The server raises that interval for larger point selections or slow SQL responses, while the browser prevents overlapping requests, adds small positive jitter, pauses hidden tabs, and backs off after failures. This path queries SQL only and never issues direct BACnet or MS/TP reads. See [live hierarchy values](docs/live-hierarchy.md).
 
 When an equipment inventory and SQL trend source are configured, the service records the latest available historian samples in `history.duckdb` every 60 seconds by default. Alarm events and poll outcomes are dual-written to DuckDB while SQLite remains the operational source of truth. Repeated historian timestamps and alarm IDs are deduplicated. This rollout does not modify the remote SQL Server.
 
