@@ -10,8 +10,12 @@ const state = {
   liveError: "",
   liveLoading: false,
   liveRequestVersion: 0,
+  liveRequestInFlight: null,
   liveTimer: null,
-  refreshIntervalSeconds: 15
+  refreshIntervalMilliseconds: 1000,
+  refreshReason: "oneSecondTarget",
+  queryDurationMilliseconds: null,
+  consecutiveFailures: 0
 };
 
 const $ = (id) => document.getElementById(id);
@@ -119,6 +123,11 @@ function selectEquipment(equipment, groupName) {
   state.liveGeneratedAt = null;
   state.liveError = "";
   state.liveLoading = livePointIds(equipment).length > 0;
+  state.liveRequestInFlight = null;
+  state.refreshIntervalMilliseconds = 1000;
+  state.refreshReason = "oneSecondTarget";
+  state.queryDurationMilliseconds = null;
+  state.consecutiveFailures = 0;
   $("point-search").value = "";
   $("detail-group").textContent = groupName;
   $("detail-title").textContent = equipment.name;
@@ -230,11 +239,13 @@ async function refreshLiveValues() {
   const pointIds = livePointIds(equipment);
   if (!equipment || !pointIds.length) return;
   if (document.hidden) {
-    scheduleLiveRefresh(state.refreshIntervalSeconds * 1000);
+    scheduleLiveRefresh(state.refreshIntervalMilliseconds);
     return;
   }
 
   const requestVersion = state.liveRequestVersion;
+  if (state.liveRequestInFlight === requestVersion) return;
+  state.liveRequestInFlight = requestVersion;
   const startedAt = Date.now();
   state.liveLoading = true;
   renderLiveStatus(pointIds.length);
@@ -242,22 +253,36 @@ async function refreshLiveValues() {
     const query = new URLSearchParams({ pointSlices: pointIds.join(",") });
     const response = await fetchJson(`/api/equipment-values?${query}`);
     if (requestVersion !== state.liveRequestVersion || equipment !== state.selected) return;
-    const refreshSeconds = Number(response.refreshIntervalSeconds);
-    if (Number.isFinite(refreshSeconds) && refreshSeconds >= 5 && refreshSeconds <= 300) {
-      state.refreshIntervalSeconds = refreshSeconds;
+    const refreshMilliseconds = Number(
+      response.refreshIntervalMilliseconds ?? Number(response.refreshIntervalSeconds) * 1000
+    );
+    if (Number.isFinite(refreshMilliseconds) && refreshMilliseconds >= 1000 && refreshMilliseconds <= 60000) {
+      state.refreshIntervalMilliseconds = refreshMilliseconds;
     }
+    state.refreshReason = response.refreshReason || "oneSecondTarget";
+    const queryDuration = Number(response.queryDurationMilliseconds);
+    state.queryDurationMilliseconds = Number.isFinite(queryDuration) ? queryDuration : null;
+    state.consecutiveFailures = 0;
     state.liveValues = new Map((response.values || []).map((sample) => [sample.pointSliceId, sample]));
     state.liveGeneratedAt = response.generatedAt || new Date().toISOString();
     state.liveError = "";
   } catch (error) {
     if (requestVersion !== state.liveRequestVersion || equipment !== state.selected) return;
     state.liveError = error.message || "Unable to refresh historian values";
+    state.consecutiveFailures += 1;
+    state.refreshIntervalMilliseconds = Math.min(
+      60000,
+      Math.max(1000, state.refreshIntervalMilliseconds * 2)
+    );
+    state.refreshReason = "errorBackoff";
   } finally {
+    if (state.liveRequestInFlight === requestVersion) state.liveRequestInFlight = null;
     if (requestVersion === state.liveRequestVersion && equipment === state.selected) {
       state.liveLoading = false;
       renderPoints();
       const elapsed = Date.now() - startedAt;
-      scheduleLiveRefresh(Math.max(1000, state.refreshIntervalSeconds * 1000 - elapsed));
+      const jitteredInterval = state.refreshIntervalMilliseconds * (1 + Math.random() * 0.1);
+      scheduleLiveRefresh(Math.max(100, jitteredInterval - elapsed));
     }
   }
 }
@@ -271,16 +296,35 @@ function renderLiveStatus(historianCount = livePointIds().length) {
   }
   if (state.liveError) {
     node.classList.add("error");
-    node.textContent = `Refresh failed · retrying every ${state.refreshIntervalSeconds} seconds`;
+    node.textContent = `Historian refresh failed · retrying in ${formatRefreshInterval(state.refreshIntervalMilliseconds)}`;
     node.title = state.liveError;
     return;
   }
   if (state.liveLoading && !state.liveGeneratedAt) {
-    node.textContent = `Loading latest values · refresh every ${state.refreshIntervalSeconds} seconds`;
+    node.textContent = "Loading latest historian values · 1-second target";
     return;
   }
   const checked = state.liveGeneratedAt ? ` · checked ${formatRelativeTime(state.liveGeneratedAt)}` : "";
-  node.textContent = `Refresh every ${state.refreshIntervalSeconds} seconds${checked}${state.liveLoading ? " · refreshing" : ""}`;
+  const reason = refreshReasonLabel(state.refreshReason);
+  node.textContent = `Historian refresh every ${formatRefreshInterval(state.refreshIntervalMilliseconds)} · ${reason}${checked}${state.liveLoading ? " · refreshing" : ""}`;
+  const queryDuration = state.queryDurationMilliseconds == null ? "unknown" : `${state.queryDurationMilliseconds} ms`;
+  node.title = `Read-only SQL historian query (${historianCount} points, last query ${queryDuration}). This page does not poll the BACnet MS/TP trunk.`;
+}
+
+function formatRefreshInterval(milliseconds) {
+  const seconds = Math.max(1, Number(milliseconds) / 1000);
+  return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(seconds)} ${seconds === 1 ? "second" : "seconds"}`;
+}
+
+function refreshReasonLabel(reason) {
+  const labels = {
+    oneSecondTarget: "1-second target",
+    pointCount: "adjusted for point count",
+    queryLatency: "adjusted for query latency",
+    safetyCap: "60-second safety cap",
+    errorBackoff: "temporary failure backoff"
+  };
+  return labels[reason] || "adaptive rate";
 }
 
 function renderNotes() {

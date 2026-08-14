@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     process::Stdio,
-    time::Duration as StdDuration,
+    time::{Duration as StdDuration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -20,8 +20,11 @@ const MAX_TREND_ROWS: usize = 5_000;
 const MAX_POINT_ROWS: usize = 10_000;
 const MAX_SELECTED_POINTS: usize = 8;
 pub const MAX_LIVE_POINT_VALUES: usize = 128;
-pub const LIVE_VALUE_REFRESH_SECONDS: u64 = 15;
+pub const LIVE_VALUE_TARGET_REFRESH_MILLISECONDS: u64 = 1_000;
+pub const LIVE_VALUE_MAX_REFRESH_MILLISECONDS: u64 = 60_000;
 pub const LIVE_VALUE_LOOKBACK_HOURS: i64 = 24 * 30;
+const LIVE_VALUE_POINTS_PER_SECOND: usize = 32;
+const LIVE_VALUE_QUERY_HEADROOM: u64 = 4;
 const MAX_TREND_HOURS: i64 = 24 * 365 * 10;
 const LEGACY_HELPER_TIMEOUT_SECONDS: u64 = 40;
 const LEGACY_ZONE_ONLY_FILTER: &str = "p.PointName LIKE '%.ZN-T.#85'";
@@ -368,7 +371,13 @@ pub struct LivePointValue {
 #[serde(rename_all = "camelCase")]
 pub struct LivePointValuesResponse {
     pub generated_at: DateTime<Utc>,
+    pub refresh_interval_milliseconds: u64,
     pub refresh_interval_seconds: u64,
+    pub refresh_reason: &'static str,
+    pub query_duration_milliseconds: u64,
+    pub point_count: usize,
+    pub source: &'static str,
+    pub polls_mstp_trunk: bool,
     pub lookback_hours: i64,
     pub values: Vec<LivePointValue>,
 }
@@ -594,11 +603,15 @@ pub async fn fetch_live_point_values(
     if point_slice_ids.is_empty() {
         bail!("select at least one historian point");
     }
+    let point_count = point_slice_ids.len();
     let query = latest_point_values_query(&point_slice_ids)?;
     validate_read_only_query(&query)?;
     let to = Utc::now();
     let from = to - Duration::hours(LIVE_VALUE_LOOKBACK_HOURS);
+    let query_started_at = Instant::now();
     let (rows, truncated) = fetch_sample_rows(settings, &query, from, to).await?;
+    let query_duration_milliseconds =
+        u64::try_from(query_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
     if truncated {
         bail!("latest-value query exceeded its bounded result size");
     }
@@ -624,13 +637,49 @@ pub async fn fetch_live_point_values(
         });
     }
     values.sort_by_key(|value| value.point_slice_id);
+    let (refresh_interval_milliseconds, refresh_reason) =
+        live_refresh_recommendation(point_count, query_duration_milliseconds);
 
     Ok(LivePointValuesResponse {
         generated_at: Utc::now(),
-        refresh_interval_seconds: LIVE_VALUE_REFRESH_SECONDS,
+        refresh_interval_milliseconds,
+        refresh_interval_seconds: refresh_interval_milliseconds.div_ceil(1_000),
+        refresh_reason,
+        query_duration_milliseconds,
+        point_count,
+        source: "metasysSqlHistorian",
+        polls_mstp_trunk: false,
         lookback_hours: LIVE_VALUE_LOOKBACK_HOURS,
         values,
     })
+}
+
+fn live_refresh_recommendation(
+    point_count: usize,
+    query_duration_milliseconds: u64,
+) -> (u64, &'static str) {
+    let point_batches = point_count.max(1).div_ceil(LIVE_VALUE_POINTS_PER_SECOND);
+    let point_interval = u64::try_from(point_batches)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(LIVE_VALUE_TARGET_REFRESH_MILLISECONDS);
+    let latency_interval = query_duration_milliseconds
+        .saturating_mul(LIVE_VALUE_QUERY_HEADROOM)
+        .max(LIVE_VALUE_TARGET_REFRESH_MILLISECONDS);
+    let unconstrained = point_interval.max(latency_interval);
+    let interval = unconstrained.clamp(
+        LIVE_VALUE_TARGET_REFRESH_MILLISECONDS,
+        LIVE_VALUE_MAX_REFRESH_MILLISECONDS,
+    );
+    let reason = if unconstrained > LIVE_VALUE_MAX_REFRESH_MILLISECONDS {
+        "safetyCap"
+    } else if latency_interval > point_interval {
+        "queryLatency"
+    } else if point_interval > LIVE_VALUE_TARGET_REFRESH_MILLISECONDS {
+        "pointCount"
+    } else {
+        "oneSecondTarget"
+    };
+    (interval, reason)
 }
 
 async fn fetch_sample_rows(
@@ -1166,9 +1215,9 @@ fn validate_read_only_query(query: &str) -> Result<()> {
 mod tests {
     use super::{
         DEFAULT_HVAC_FILTER, LEGACY_ZONE_ONLY_FILTER, SampleRow, SqlTrendSettings, group_rows,
-        latest_point_values_query, selected_point_query, trend_point_metadata,
-        validate_live_point_slice_ids, validate_point_slice_ids, validate_read_only_query,
-        validate_trend_window,
+        latest_point_values_query, live_refresh_recommendation, selected_point_query,
+        trend_point_metadata, validate_live_point_slice_ids, validate_point_slice_ids,
+        validate_read_only_query, validate_trend_window,
     };
     use chrono::{Duration, TimeZone, Utc};
 
@@ -1230,6 +1279,29 @@ mod tests {
         assert!(validate_live_point_slice_ids(&[1, 1]).is_err());
         assert!(validate_live_point_slice_ids(&[0]).is_err());
         assert!(validate_live_point_slice_ids(&(1..=129).collect::<Vec<_>>()).is_err());
+    }
+
+    #[test]
+    fn live_refresh_targets_one_second_and_scales_with_point_count() {
+        assert_eq!(
+            live_refresh_recommendation(1, 20),
+            (1_000, "oneSecondTarget")
+        );
+        assert_eq!(
+            live_refresh_recommendation(32, 20),
+            (1_000, "oneSecondTarget")
+        );
+        assert_eq!(live_refresh_recommendation(33, 20), (2_000, "pointCount"));
+        assert_eq!(live_refresh_recommendation(128, 20), (4_000, "pointCount"));
+    }
+
+    #[test]
+    fn live_refresh_reserves_query_headroom_and_caps_backoff() {
+        assert_eq!(live_refresh_recommendation(4, 750), (3_000, "queryLatency"));
+        assert_eq!(
+            live_refresh_recommendation(4, 20_000),
+            (60_000, "safetyCap")
+        );
     }
 
     #[test]
