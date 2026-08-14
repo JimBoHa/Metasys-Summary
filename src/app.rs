@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+    time::Instant,
+};
 
 use anyhow::Result;
 use chrono::Utc;
@@ -14,6 +18,7 @@ use crate::{
         EmailDeliveryResult, EmailReportSettings, EmailReportSettingsUpdate,
         EmailReportSettingsView, clear_smtp_password, send_report, set_smtp_password, test_smtp,
     },
+    history::{HistoryPointSample, HistoryPollRun, HistoryStore},
     metasys::MetasysClient,
     models::{
         AlarmRecord, DashboardView, FeedStatus, HealthView, OverrideRecord, PointExceptionRecord,
@@ -21,9 +26,10 @@ use crate::{
     },
     portal::models::{PortalMapView, PortalUserRecord, TemperatureReading},
     sql_trends::{
-        LivePointValuesResponse, SqlTrendSettingsUpdate, SqlTrendSettingsView, TrendPointCatalog,
-        TrendResponse, clear_sql_password, fetch_live_point_values, fetch_trend_points,
-        fetch_trends_window, set_sql_password, test_connection,
+        LivePointValue, LivePointValuesResponse, MAX_LIVE_POINT_VALUES, SqlTrendSettingsUpdate,
+        SqlTrendSettingsView, TrendPointCatalog, TrendResponse, clear_sql_password,
+        fetch_live_point_values, fetch_trend_points, fetch_trends_window, set_sql_password,
+        test_connection,
     },
     store::Store,
 };
@@ -47,6 +53,7 @@ struct CachedTemperature {
 pub struct AppState {
     config: RwLock<Arc<Config>>,
     store: Arc<Store>,
+    history_store: Arc<HistoryStore>,
     client: RwLock<Arc<MetasysClient>>,
     live: RwLock<LiveData>,
     poll_lock: Mutex<()>,
@@ -57,9 +64,11 @@ pub struct AppState {
 impl AppState {
     pub fn new(config: Arc<Config>, store: Arc<Store>) -> Result<Self> {
         let client = Arc::new(MetasysClient::new(config.clone())?);
+        let history_store = Arc::new(HistoryStore::open(&config.history_database_path)?);
         Ok(Self {
             config: RwLock::new(config),
             store,
+            history_store,
             client: RwLock::new(client),
             live: RwLock::new(LiveData::default()),
             poll_lock: Mutex::new(()),
@@ -114,6 +123,9 @@ impl AppState {
         duration_ms: u64,
     ) -> Result<()> {
         self.store.upsert_alarms(&data.alarms)?;
+        if let Err(error) = self.history_store.record_alarms(&data.alarms, attempted_at) {
+            tracing::warn!(error = %error, "failed to record alarms in DuckDB history");
+        }
         if let Err(error) = self.store.record_poll(
             true,
             data.active_alarms.len(),
@@ -122,6 +134,16 @@ impl AppState {
             None,
         ) {
             tracing::warn!(error = %error, "failed to record successful poll");
+        }
+        if let Err(error) = self.history_store.record_poll(&HistoryPollRun {
+            attempted_at,
+            succeeded: true,
+            active_alarm_count: data.active_alarms.len(),
+            override_count: data.overrides.len(),
+            duration_ms,
+            error_message: None,
+        }) {
+            tracing::warn!(error = %error, "failed to record successful poll in DuckDB history");
         }
         if let Err(error) = self.store.prune(history_days + 7) {
             tracing::warn!(error = %error, "failed to prune dashboard history");
@@ -164,6 +186,16 @@ impl AppState {
             Some(&message),
         ) {
             tracing::warn!(error = %store_error, "failed to record unsuccessful poll");
+        }
+        if let Err(store_error) = self.history_store.record_poll(&HistoryPollRun {
+            attempted_at: Utc::now(),
+            succeeded: false,
+            active_alarm_count: active_count,
+            override_count,
+            duration_ms,
+            error_message: Some(message.chars().take(1_000).collect()),
+        }) {
+            tracing::warn!(error = %store_error, "failed to record unsuccessful poll in DuckDB history");
         }
         let mut live = self.live.write().await;
         live.health.state = "error".to_owned();
@@ -417,11 +449,97 @@ impl AppState {
         point_slice_ids: &[i32],
     ) -> Result<LivePointValuesResponse> {
         let settings = self.store.sql_trend_settings()?;
-        fetch_live_point_values(&settings, point_slice_ids).await
+        let response = fetch_live_point_values(&settings, point_slice_ids).await?;
+        if let Err(error) = self.record_live_point_values(&response.values) {
+            tracing::warn!(error = %error, "failed to record requested point values in DuckDB history");
+        }
+        Ok(response)
+    }
+
+    pub async fn record_inventory_point_snapshot(&self) -> Result<usize> {
+        let settings = self.store.sql_trend_settings()?;
+        if !settings.enabled {
+            return Ok(0);
+        }
+        let metadata = self.history_point_metadata()?;
+        let point_slice_ids = metadata.keys().copied().collect::<Vec<_>>();
+        if point_slice_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let mut recorded = 0;
+        for chunk in point_slice_ids.chunks(MAX_LIVE_POINT_VALUES) {
+            let response = fetch_live_point_values(&settings, chunk).await?;
+            recorded += self.record_live_point_values_with_metadata(&response.values, &metadata)?;
+        }
+        Ok(recorded)
     }
 
     pub(crate) fn store(&self) -> &Store {
         &self.store
+    }
+
+    fn record_live_point_values(&self, values: &[LivePointValue]) -> Result<usize> {
+        let metadata = self.history_point_metadata()?;
+        self.record_live_point_values_with_metadata(values, &metadata)
+    }
+
+    fn record_live_point_values_with_metadata(
+        &self,
+        values: &[LivePointValue],
+        metadata: &BTreeMap<i32, (String, String)>,
+    ) -> Result<usize> {
+        let samples = values
+            .iter()
+            .map(|value| {
+                let (point_name, equipment) = metadata
+                    .get(&value.point_slice_id)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        (
+                            format!("PointSlice {}", value.point_slice_id),
+                            "Unmapped equipment".to_owned(),
+                        )
+                    });
+                HistoryPointSample {
+                    point_slice_id: value.point_slice_id,
+                    point_name,
+                    equipment,
+                    timestamp: value.timestamp,
+                    value: value.value,
+                    unit: value.unit.clone(),
+                    source: "Metasys SQL historian".to_owned(),
+                }
+            })
+            .collect::<Vec<_>>();
+        self.history_store.record_point_samples(&samples)
+    }
+
+    fn history_point_metadata(&self) -> Result<BTreeMap<i32, (String, String)>> {
+        let mut metadata = BTreeMap::new();
+        let Some(inventory) = self.store.equipment_inventory()? else {
+            return Ok(metadata);
+        };
+        for equipment in inventory
+            .groups
+            .into_iter()
+            .flat_map(|group| group.equipment)
+        {
+            for point in equipment.points {
+                let Some(point_slice_id) = point.historian_point_slice_id else {
+                    continue;
+                };
+                let point_name = if point.reference.trim().is_empty() {
+                    point.name
+                } else {
+                    point.reference
+                };
+                metadata
+                    .entry(point_slice_id)
+                    .or_insert_with(|| (point_name, equipment.name.clone()));
+            }
+        }
+        Ok(metadata)
     }
 
     pub async fn portal_map(&self, user: &PortalUserRecord) -> Result<PortalMapView> {

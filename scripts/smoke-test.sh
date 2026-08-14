@@ -52,6 +52,7 @@ fi
 
 METASYS_CONFIG="$smoke_directory/missing-config.toml" \
 METASYS_DATABASE_PATH="$smoke_directory/dashboard.sqlite3" \
+METASYS_HISTORY_DATABASE_PATH="$smoke_directory/history.duckdb" \
 METASYS_BIND_ADDRESS="127.0.0.1" \
 METASYS_PORT="$smoke_port" \
 METASYS_OPEN_BROWSER="false" \

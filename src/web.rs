@@ -554,6 +554,8 @@ mod tests {
             poll_interval_seconds: 60,
             history_days: 30,
             database_path: database_path.to_owned(),
+            history_database_path: database_path.with_extension("duckdb"),
+            history_sample_interval_seconds: 60,
             accept_invalid_certificates: false,
             open_browser: false,
             keychain_service: "portal-test".to_owned(),

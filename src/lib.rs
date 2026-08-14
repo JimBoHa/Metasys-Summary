@@ -3,6 +3,7 @@ pub mod app;
 pub mod config;
 pub mod diagnostics;
 pub mod email_reports;
+pub mod history;
 pub mod inventory;
 pub mod metasys;
 pub mod models;

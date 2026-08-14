@@ -14,6 +14,9 @@ bind_address = "127.0.0.1"
 port = 3030
 poll_interval_seconds = 60
 history_days = 30
+# DuckDB captures imported historian point samples and alarm/poll history.
+history_sample_interval_seconds = 60
+# history_database_path = "/path/to/history.duckdb"
 
 # Set true only when a private Metasys deployment uses an untrusted certificate.
 accept_invalid_certificates = false

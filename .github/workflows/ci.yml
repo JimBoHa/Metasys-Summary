@@ -21,6 +21,7 @@ jobs:
     timeout-minutes: 20
     env:
       CARGO_TERM_COLOR: always
+      DUCKDB_DOWNLOAD_LIB: "1"
       RUST_BACKTRACE: "1"
     steps:
       - name: Check out repository

@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 use metasys_dashboard::{
     app::AppState,
     config::{Config, ConnectorPreference, load_password, store_password},
+    history::HistoryStore,
     metasys::MetasysClient,
     portal::{auth::hash_password, models::PortalRole},
     sql_trends::{
@@ -71,6 +72,8 @@ enum Command {
     },
     /// Verify the saved SQL connection, point catalog, and one read-only trend query.
     CheckSql,
+    /// Verify the local DuckDB history schema and report stored row counts.
+    CheckHistory,
     /// List saved SQL historian points, optionally filtering by reference text.
     ListSqlPoints {
         #[arg(long)]
@@ -132,6 +135,7 @@ async fn main() -> Result<()> {
             legacy_tls,
         ),
         Some(Command::CheckSql) => check_sql(config).await,
+        Some(Command::CheckHistory) => check_history(config),
         Some(Command::ListSqlPoints { contains }) => list_sql_points(config, contains).await,
         Some(Command::ImportInventory { file }) => import_inventory(config, file),
         Some(Command::CheckTemperature {
@@ -160,6 +164,21 @@ fn import_inventory(config: Config, file: PathBuf) -> Result<()> {
         inventory.groups.len(),
         inventory.equipment_count(),
         inventory.point_count()
+    );
+    Ok(())
+}
+
+fn check_history(config: Config) -> Result<()> {
+    config.ensure_data_directory()?;
+    let history = HistoryStore::open(&config.history_database_path)?;
+    let summary = history.summary()?;
+    println!(
+        "DuckDB history OK: schema {} | {} point samples | {} alarm events | {} poll runs | {}",
+        summary.schema_version,
+        summary.point_samples,
+        summary.alarm_events,
+        summary.poll_runs,
+        history.path().display(),
     );
     Ok(())
 }
@@ -494,6 +513,26 @@ async fn serve(mut config: Config, cli_open_browser: bool) -> Result<()> {
         loop {
             interval.tick().await;
             poll_state.poll_once().await;
+        }
+    });
+
+    let history_state = state.clone();
+    let history_sample_interval = config.history_sample_interval_seconds;
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(history_sample_interval));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            match history_state.record_inventory_point_snapshot().await {
+                Ok(recorded) if recorded > 0 => {
+                    tracing::info!(recorded, "recorded historian point samples in DuckDB");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(error = %error, "DuckDB historian snapshot failed");
+                }
+            }
         }
     });
 

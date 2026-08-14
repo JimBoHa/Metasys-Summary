@@ -163,6 +163,8 @@ pub struct Config {
     pub poll_interval_seconds: u64,
     pub history_days: i64,
     pub database_path: PathBuf,
+    pub history_database_path: PathBuf,
+    pub history_sample_interval_seconds: u64,
     pub accept_invalid_certificates: bool,
     pub open_browser: bool,
     pub keychain_service: String,
@@ -183,6 +185,8 @@ struct FileConfig {
     poll_interval_seconds: Option<u64>,
     history_days: Option<i64>,
     database_path: Option<PathBuf>,
+    history_database_path: Option<PathBuf>,
+    history_sample_interval_seconds: Option<u64>,
     accept_invalid_certificates: Option<bool>,
     open_browser: Option<bool>,
     keychain_service: Option<String>,
@@ -252,6 +256,18 @@ impl Config {
             .or_else(|| force_demo.then(|| default_data_dir.join("dashboard-demo.sqlite3")))
             .or(file.database_path)
             .unwrap_or_else(|| default_data_dir.join("dashboard.sqlite3"));
+        let history_database_path = env::var_os("METASYS_HISTORY_DATABASE_PATH")
+            .map(PathBuf::from)
+            .or(if force_demo {
+                None
+            } else {
+                file.history_database_path
+            })
+            .unwrap_or_else(|| default_history_path(&database_path, &default_data_dir, force_demo));
+        let history_sample_interval_seconds = parse_env("METASYS_HISTORY_SAMPLE_INTERVAL_SECONDS")?
+            .or(file.history_sample_interval_seconds)
+            .unwrap_or(60)
+            .clamp(15, 3_600);
 
         Ok(Self {
             server_url: server_url.trim_end_matches('/').to_owned(),
@@ -269,6 +285,8 @@ impl Config {
             poll_interval_seconds,
             history_days,
             database_path,
+            history_database_path,
+            history_sample_interval_seconds,
             accept_invalid_certificates: parse_env("METASYS_ACCEPT_INVALID_CERTIFICATES")?
                 .or(file.accept_invalid_certificates)
                 .unwrap_or(false),
@@ -282,7 +300,13 @@ impl Config {
     }
 
     pub fn ensure_data_directory(&self) -> Result<()> {
-        if let Some(parent) = self.database_path.parent() {
+        for parent in [
+            self.database_path.parent(),
+            self.history_database_path.parent(),
+        ]
+        .into_iter()
+        .flatten()
+        {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create data directory {}", parent.display()))?;
         }
@@ -342,6 +366,22 @@ fn application_support_dir() -> PathBuf {
         .join("Library/Application Support/Metasys Dashboard")
 }
 
+fn default_history_path(
+    database_path: &Path,
+    default_data_dir: &Path,
+    force_demo: bool,
+) -> PathBuf {
+    database_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(default_data_dir)
+        .join(if force_demo {
+            "history-demo.duckdb"
+        } else {
+            "history.duckdb"
+        })
+}
+
 fn env_string(name: &str) -> Option<String> {
     env::var(name).ok().filter(|value| !value.trim().is_empty())
 }
@@ -364,7 +404,26 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{ConnectorPreference, MetasysConnectionUpdate};
+    use std::path::Path;
+
+    use super::{ConnectorPreference, MetasysConnectionUpdate, default_history_path};
+
+    #[test]
+    fn duckdb_history_defaults_beside_the_operational_database() {
+        let default_data = Path::new("/default/application-support");
+        assert_eq!(
+            default_history_path(
+                Path::new("/external/dashboard.sqlite3"),
+                default_data,
+                false
+            ),
+            Path::new("/external/history.duckdb")
+        );
+        assert_eq!(
+            default_history_path(Path::new("/tmp/test/dashboard.sqlite3"), default_data, true),
+            Path::new("/tmp/test/history-demo.duckdb")
+        );
+    }
 
     #[test]
     fn connector_aliases_parse() {

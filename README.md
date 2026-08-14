@@ -1,6 +1,6 @@
 # Metasys Operations and Maintenance Portal
 
-Native Rust service for macOS with authenticated maintenance and operations web interfaces. It monitors Johnson Controls Metasys alarm activity and operator overrides, overlays live temperatures on editable floor plans, tracks scoped service requests, persists history in SQLite, and calculates equipment risk locally.
+Native Rust service for macOS with authenticated maintenance and operations web interfaces. It monitors Johnson Controls Metasys alarm activity and operator overrides, overlays live temperatures on editable floor plans, tracks scoped service requests, persists transactional application data in SQLite and analytical history in DuckDB, and calculates equipment risk locally.
 
 Licensed under the [MIT License](LICENSE).
 
@@ -32,6 +32,7 @@ cargo run -- portal-admin --email you@example.com --name "Your Name"
 
 ```bash
 cargo run -- check
+cargo run -- check-history
 cargo run
 ```
 
@@ -103,7 +104,9 @@ Passwords stay in macOS Keychain. Only encrypted SMTP transports are supported: 
 
 Open **SQL Trends** from a browser on the host Mac. Configure the SQL Server hostname or IP, port, database, read-only username, password, certificate policy, and optional legacy-TLS compatibility. The password is stored only in macOS Keychain; non-secret settings are stored in the dashboard SQLite database. Settings endpoints reject non-loopback clients.
 
-Operators can open `/trends`, load the Metasys historian point catalog, search by equipment or point name, select up to eight points, and graph up to 5,000 samples over preset or custom windows as long as 10 years. The server reports the actual mean-aggregation interval it used. Current Metasys historian tables are queried directly with bounded, parameterized `SELECT` statements. No remote database content is modified or copied locally.
+Operators can open `/trends`, load the Metasys historian point catalog, search by equipment or point name, select up to eight points, and graph up to 5,000 samples over preset or custom windows as long as 10 years. The server reports the actual mean-aggregation interval it used. Current Metasys historian tables are queried directly with bounded, parameterized `SELECT` statements. No remote database content is modified; the latest imported-equipment samples are copied into local DuckDB history for analysis.
+
+When an equipment inventory and SQL trend source are configured, the service records the latest available historian samples in `history.duckdb` every 60 seconds by default. Alarm events and poll outcomes are dual-written to DuckDB while SQLite remains the operational source of truth. Repeated historian timestamps and alarm IDs are deduplicated. This rollout does not modify the remote SQL Server.
 
 The mapping query must be one read-only `SELECT` or `WITH` statement, use `@P1` and `@P2` for UTC start/end bounds, and return these aliases:
 
@@ -127,6 +130,8 @@ Metasys repository schemas vary. The advanced query remains available for compat
 | `METASYS_BIND_ADDRESS` | `127.0.0.1` for local-only or `0.0.0.0` for LAN |
 | `METASYS_PORT` | Dashboard port, default `3030` |
 | `METASYS_DATABASE_PATH` | SQLite database location |
+| `METASYS_HISTORY_DATABASE_PATH` | DuckDB analytical-history location; defaults beside SQLite |
+| `METASYS_HISTORY_SAMPLE_INTERVAL_SECONDS` | Latest-point capture interval, default 60 seconds (15–3,600) |
 
 ## Security and operations
 
@@ -138,7 +143,7 @@ Metasys repository schemas vary. The advanced query remains available for compat
 - SQL settings and connection testing are restricted to loopback clients. Trend results remain visible wherever the dashboard is visible.
 - Certificate validation is enabled by default. Use `accept_invalid_certificates = true` only for an isolated deployment whose private certificate cannot yet be trusted.
 - Use an API-access Metasys account when the public REST API add-on is available. Johnson Controls documents that Standard and Tenant access types are rejected by the public REST API.
-- Alarm history stays on this Mac in `~/Library/Application Support/Metasys Dashboard/dashboard.sqlite3`.
+- Transactional application state stays in `dashboard.sqlite3`; point samples plus an analytical copy of alarm and poll history are stored in `history.duckdb`. Back up both files.
 
 ## Verify
 
