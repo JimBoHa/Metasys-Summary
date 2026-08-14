@@ -6,6 +6,7 @@ use metasys_dashboard::{
     app::AppState,
     config::{Config, ConnectorPreference, load_password, store_password},
     history::HistoryStore,
+    history_migration::migrate_sqlite_history,
     metasys::MetasysClient,
     portal::{auth::hash_password, models::PortalRole},
     sql_trends::{
@@ -74,6 +75,18 @@ enum Command {
     CheckSql,
     /// Verify the local DuckDB history schema and report stored row counts.
     CheckHistory,
+    /// Copy legacy alarm and poll history from SQLite into DuckDB.
+    MigrateHistory {
+        /// Legacy SQLite source; defaults to the configured operational database.
+        #[arg(long)]
+        source: Option<PathBuf>,
+        /// DuckDB target; defaults to the configured history database.
+        #[arg(long)]
+        target: Option<PathBuf>,
+        /// Validate and report rows without creating or changing DuckDB.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// List saved SQL historian points, optionally filtering by reference text.
     ListSqlPoints {
         #[arg(long)]
@@ -136,6 +149,11 @@ async fn main() -> Result<()> {
         ),
         Some(Command::CheckSql) => check_sql(config).await,
         Some(Command::CheckHistory) => check_history(config),
+        Some(Command::MigrateHistory {
+            source,
+            target,
+            dry_run,
+        }) => migrate_history(config, source, target, dry_run),
         Some(Command::ListSqlPoints { contains }) => list_sql_points(config, contains).await,
         Some(Command::ImportInventory { file }) => import_inventory(config, file),
         Some(Command::CheckTemperature {
@@ -173,12 +191,43 @@ fn check_history(config: Config) -> Result<()> {
     let history = HistoryStore::open(&config.history_database_path)?;
     let summary = history.summary()?;
     println!(
-        "DuckDB history OK: schema {} | {} point samples | {} alarm events | {} poll runs | {}",
+        "DuckDB history OK: schema {} | {} point samples | {} alarm events | {} poll runs | {} legacy imports | {}",
         summary.schema_version,
         summary.point_samples,
         summary.alarm_events,
         summary.poll_runs,
+        summary.legacy_imports,
         history.path().display(),
+    );
+    Ok(())
+}
+
+fn migrate_history(
+    config: Config,
+    source: Option<PathBuf>,
+    target: Option<PathBuf>,
+    dry_run: bool,
+) -> Result<()> {
+    let source = source.unwrap_or_else(|| config.database_path.clone());
+    let target = target.unwrap_or_else(|| config.history_database_path.clone());
+    let report = migrate_sqlite_history(&source, &target, dry_run)?;
+    println!(
+        "{}: {} alarm rows | {} poll rows | source fingerprint {}{}",
+        if dry_run {
+            "DuckDB migration dry run OK"
+        } else if report.already_imported {
+            "DuckDB migration already applied"
+        } else {
+            "DuckDB migration complete"
+        },
+        report.alarm_rows,
+        report.poll_rows,
+        report.source_fingerprint,
+        if dry_run {
+            String::new()
+        } else {
+            format!(" | {}", report.target.display())
+        }
     );
     Ok(())
 }

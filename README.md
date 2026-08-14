@@ -108,6 +108,8 @@ Operators can open `/trends`, load the Metasys historian point catalog, search b
 
 When an equipment inventory and SQL trend source are configured, the service records the latest available historian samples in `history.duckdb` every 60 seconds by default. Alarm events and poll outcomes are dual-written to DuckDB while SQLite remains the operational source of truth. Repeated historian timestamps and alarm IDs are deduplicated. This rollout does not modify the remote SQL Server.
 
+Existing alarm and poll history can be validated and imported with `migrate-history`. The importer opens SQLite read-only, supports older optional-column layouts, and applies each logical source snapshot atomically and idempotently. See [SQLite history migration](docs/history-migration.md). A dry run is required operationally before migrating a production file.
+
 The mapping query must be one read-only `SELECT` or `WITH` statement, use `@P1` and `@P2` for UTC start/end bounds, and return these aliases:
 
 - `point_name` as text
