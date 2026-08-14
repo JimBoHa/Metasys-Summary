@@ -12,6 +12,7 @@ use super::{
 use crate::{
     config::Config,
     models::{AlarmRecord, OverrideRecord, PollData},
+    portal::models::TemperatureReading,
 };
 
 pub async fn login(http: &Client, config: &Config) -> Result<AuthSession> {
@@ -41,6 +42,8 @@ pub async fn login(http: &Client, config: &Config) -> Result<AuthSession> {
         },
         token,
         expires_at,
+        client_id: None,
+        authorization_data: None,
     })
 }
 
@@ -96,6 +99,151 @@ pub async fn fetch(http: &Client, config: &Config, token: &str, version: &str) -
         alarms,
         active_alarms,
         overrides,
+    })
+}
+
+pub async fn read_temperature(
+    http: &Client,
+    config: &Config,
+    token: &str,
+    version: &str,
+    object_id: &str,
+    attribute_id: &str,
+) -> Result<TemperatureReading> {
+    let attribute = if attribute_id.trim().is_empty() || attribute_id.trim() == "85" {
+        "presentValue"
+    } else {
+        attribute_id.trim()
+    };
+    let url = object_attribute_url(config, version, object_id, attribute)?;
+    let response = http
+        .get(url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .context("read live Metasys temperature attribute")?;
+    let status = response.status();
+    let body = response
+        .json::<Value>()
+        .await
+        .context("decode live Metasys temperature attribute")?;
+    if !status.is_success() {
+        bail!("Metasys temperature read failed ({status})");
+    }
+    let mut reading = parse_temperature_attribute(&body, attribute)?;
+    if reading.unit.is_empty()
+        && let Ok(unit) = read_object_unit(http, config, token, version, object_id).await
+    {
+        reading.unit = unit;
+    }
+    Ok(reading)
+}
+
+fn object_attribute_url(
+    config: &Config,
+    version: &str,
+    object_id: &str,
+    attribute: &str,
+) -> Result<reqwest::Url> {
+    let mut url = reqwest::Url::parse(&config.server_url).context("parse Metasys server URL")?;
+    let mut segments = url
+        .path_segments_mut()
+        .map_err(|_| anyhow::anyhow!("Metasys server URL cannot contain this path"))?;
+    segments.pop_if_empty().extend([
+        "api",
+        version,
+        "objects",
+        object_id.trim(),
+        "attributes",
+        attribute,
+    ]);
+    drop(segments);
+    Ok(url)
+}
+
+async fn read_object_unit(
+    http: &Client,
+    config: &Config,
+    token: &str,
+    version: &str,
+    object_id: &str,
+) -> Result<String> {
+    let response = http
+        .get(object_attribute_url(config, version, object_id, "units")?)
+        .bearer_auth(token)
+        .send()
+        .await
+        .context("read live Metasys temperature units")?;
+    if !response.status().is_success() {
+        bail!("Metasys units attribute was unavailable");
+    }
+    let body = response
+        .json::<Value>()
+        .await
+        .context("decode Metasys temperature units")?;
+    let unit = first_string(
+        &body,
+        &[
+            "/item/units",
+            "/item/units/title",
+            "/item/units/id",
+            "/schema/properties/units/title",
+        ],
+    )
+    .map(|value| display_unit(&value))
+    .unwrap_or_default();
+    if unit.is_empty() {
+        bail!("Metasys units response did not contain a value");
+    }
+    Ok(unit)
+}
+
+fn display_unit(value: &str) -> String {
+    let short = value.rsplit('.').next().unwrap_or(value).trim();
+    match short.to_ascii_lowercase().as_str() {
+        "degf" | "degreesfahrenheit" => "°F".to_owned(),
+        "degc" | "degreescelsius" => "°C".to_owned(),
+        "percent" | "percentrh" => "%".to_owned(),
+        "kelvin" => "K".to_owned(),
+        _ => short.to_owned(),
+    }
+}
+
+fn parse_temperature_attribute(body: &Value, attribute: &str) -> Result<TemperatureReading> {
+    let raw_value = body.get("item").and_then(|item| item.get(attribute));
+    let value = raw_value.and_then(|value| {
+        value
+            .as_f64()
+            .or_else(|| value.as_str()?.trim().parse::<f64>().ok())
+    });
+    let display_value = raw_value
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .or_else(|| value.map(|value| format!("{value:.1}")))
+        .unwrap_or_default();
+    if display_value.is_empty() {
+        bail!("Metasys temperature response did not contain {attribute}");
+    }
+    let unit = body
+        .pointer(&format!("/schema/properties/{attribute}/units/title"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let status_text = body
+        .pointer(&format!("/condition/{attribute}/reliability"))
+        .and_then(Value::as_str)
+        .unwrap_or("Current")
+        .rsplit('.')
+        .next()
+        .unwrap_or("Current")
+        .to_owned();
+    Ok(TemperatureReading {
+        value,
+        display_value,
+        unit,
+        status: status_text,
+        observed_at: Utc::now(),
+        available: true,
+        error: None,
     })
 }
 
@@ -581,7 +729,7 @@ mod tests {
     use chrono::TimeZone;
     use serde_json::json;
 
-    use super::{normalize_next_url, parse_alarm};
+    use super::{display_unit, normalize_next_url, parse_alarm, parse_temperature_attribute};
 
     #[test]
     fn parses_v6_activity_alarm() {
@@ -644,5 +792,22 @@ mod tests {
             Some("https://metasys.local/api/v3/alarms?page=2")
         );
         assert!(normalize_next_url("https://attacker.invalid/page", initial, server).is_none());
+    }
+
+    #[test]
+    fn parses_rest_temperature_attribute() {
+        let reading = parse_temperature_attribute(
+            &json!({
+                "item": {"presentValue": 71.8},
+                "condition": {"presentValue": {"reliability": "reliabilityEnumSet.reliable"}}
+            }),
+            "presentValue",
+        )
+        .unwrap();
+        assert_eq!(reading.value, Some(71.8));
+        assert_eq!(reading.display_value, "71.8");
+        assert_eq!(reading.unit, "");
+        assert_eq!(reading.status, "reliable");
+        assert_eq!(display_unit("unitEnumSet.degF"), "°F");
     }
 }

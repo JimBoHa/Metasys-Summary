@@ -1,0 +1,21 @@
+[package]
+name = "metasys-sql-legacy-helper"
+version = "0.1.0"
+edition = "2021"
+description = "Isolated legacy TLS SQL Server connector for Metasys Summary"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+tiberius = { version = "0.12.3", default-features = false, features = ["chrono", "tds73", "vendored-openssl"] }
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "rt-multi-thread", "time"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+
+[profile.release]
+lto = "thin"
+strip = true

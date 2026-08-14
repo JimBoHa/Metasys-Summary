@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'">
+  <title>Building Maintenance Portal</title>
+  <link rel="stylesheet" href="/portal.css">
+  <script src="/portal.js" defer></script>
+</head>
+<body>
+  <section id="login-view" class="login-shell">
+    <div class="login-art" aria-hidden="true">
+      <div class="blueprint-grid"></div>
+      <div class="building-silhouette">
+        <span></span><span></span><span></span><span></span><span></span><span></span>
+      </div>
+      <p>SPACE / COMFORT / RESPONSE</p>
+    </div>
+    <div class="login-panel">
+      <div class="brand-lockup">
+        <span class="brand-symbol"><i></i><i></i><i></i></span>
+        <span><small>METASYS SUMMARY</small><strong>Maintenance Portal</strong></span>
+      </div>
+      <div id="setup-notice" class="setup-notice" hidden>
+        <span>INITIAL SETUP</span>
+        <h1>Set up the portal</h1>
+        <form id="setup-metasys-form" class="setup-step" hidden>
+          <p class="eyebrow">STEP 1 · LIVE DATA</p>
+          <h2>Connect to Metasys</h2>
+          <p>Test the building server and save its password directly to this Mac's Keychain.</p>
+          <label>Server URL<input id="setup-metasys-server-url" type="url" required maxlength="2048" placeholder="https://metasys.example.local"></label>
+          <label>Username<input id="setup-metasys-username" autocomplete="username" required maxlength="256"></label>
+          <label>Password<input id="setup-metasys-password" type="password" autocomplete="current-password" required maxlength="1024"></label>
+          <label>Confirm password<input id="setup-metasys-password-confirmation" type="password" autocomplete="current-password" required maxlength="1024"></label>
+          <div class="form-grid">
+            <label>Connector<select id="setup-metasys-connector"><option value="auto">Auto detect</option><option value="legacy">Legacy UI</option><option value="rest">REST API</option></select></label>
+            <label>API version<select id="setup-metasys-api-version"><option value="auto">Auto detect</option><option value="v2">v2</option><option value="v3">v3</option><option value="v4">v4</option><option value="v5">v5</option><option value="v6">v6</option></select></label>
+          </div>
+          <label>Legacy domain<input id="setup-metasys-domain" required maxlength="128" value="Metasys Local"></label>
+          <label class="toggle-field"><input id="setup-metasys-invalid-certificates" type="checkbox"> Trust this server's self-signed certificate</label>
+          <p id="setup-metasys-password-state" class="credential-state">No password saved for this connection.</p>
+          <div id="setup-metasys-message" class="form-message" role="status" aria-live="polite"></div>
+          <button id="setup-metasys-button" class="primary-button" type="submit">Test connection and save</button>
+        </form>
+        <form id="setup-form" hidden>
+          <p class="eyebrow">STEP 2 · SECURE ACCESS</p>
+          <h2>Create the first administrator</h2>
+          <p>This first account has full access to buildings, floor plans, users, requests, and operations data.</p>
+          <label>Display name<input id="setup-display-name" autocomplete="name" required maxlength="120"></label>
+          <label>Email address<input id="setup-email" type="email" autocomplete="username" required maxlength="254"></label>
+          <label>Password<input id="setup-password" type="password" autocomplete="new-password" required minlength="12" maxlength="256"><small>Use at least 12 characters and mix character types.</small></label>
+          <label>Confirm password<input id="setup-password-confirmation" type="password" autocomplete="new-password" required minlength="12" maxlength="256"></label>
+          <div id="setup-message" class="form-message" role="status" aria-live="polite"></div>
+          <button id="setup-button" class="primary-button" type="submit">Create administrator</button>
+        </form>
+        <div id="setup-local-only" hidden>
+          <p>For security, create the first administrator from a browser running on the server Mac. Open this address there:</p>
+          <code>http://127.0.0.1:3030</code>
+        </div>
+      </div>
+      <form id="login-form" class="login-form">
+        <p class="eyebrow">SECURE ACCESS</p>
+        <h1>Welcome back</h1>
+        <p>Sign in to view your assigned building spaces and service requests.</p>
+        <label>Email address<input id="login-email" type="email" autocomplete="username" required maxlength="254"></label>
+        <label>Password<input id="login-password" type="password" autocomplete="current-password" required maxlength="256"></label>
+        <div id="login-message" class="form-message" role="status" aria-live="polite"></div>
+        <button id="login-button" class="primary-button" type="submit">Sign in</button>
+      </form>
+    </div>
+  </section>
+
+  <div id="app-shell" class="app-shell" hidden>
+    <header class="app-header">
+      <a class="app-brand" href="#home" aria-label="Maintenance portal home">
+        <span class="brand-symbol"><i></i><i></i><i></i></span>
+        <span><small>METASYS SUMMARY</small><strong>Maintenance Portal</strong></span>
+      </a>
+      <nav aria-label="Primary navigation">
+        <button class="nav-button active" data-view="home" type="button">Building</button>
+        <button class="nav-button" data-view="requests" type="button">Service requests</button>
+        <button id="admin-nav" class="nav-button" data-view="admin" type="button" hidden>Administration</button>
+        <a id="operations-link" class="nav-link" href="/operations" hidden>Operations</a>
+      </nav>
+      <div class="user-menu">
+        <span><strong id="current-user-name">—</strong><small id="current-user-role">—</small></span>
+        <button id="logout-button" class="icon-button" type="button" aria-label="Sign out">↗</button>
+      </div>
+    </header>
+
+    <main class="app-main">
+      <div id="global-message" class="global-message" role="status" aria-live="polite" hidden></div>
+
+      <section id="home-section" class="view-section">
+        <header class="page-heading">
+          <div><p class="eyebrow">BUILDING COMFORT</p><h1 id="home-title">Your spaces</h1><p>Choose a floor, then select an area for current conditions and reporting.</p></div>
+          <button id="refresh-map-button" class="secondary-button" type="button">Refresh values</button>
+        </header>
+        <div id="building-tabs" class="building-tabs" role="tablist"></div>
+        <section class="overview-card">
+          <header><div><p class="eyebrow">BUILDING OVERVIEW</p><h2 id="overview-title">No building configured</h2></div><span id="overview-floor-count" class="count-pill">0 floors</span></header>
+          <div id="building-overview-map" class="map-stage overview-stage"></div>
+          <div id="floor-cards" class="floor-cards"></div>
+        </section>
+        <section id="floor-section" class="floor-workspace" hidden>
+          <header class="workspace-header">
+            <div><p class="eyebrow">LIVE FLOOR VIEW</p><h2 id="floor-title">Floor</h2></div>
+            <div id="floor-tabs" class="floor-tabs"></div>
+          </header>
+          <div class="floor-layout">
+            <div id="floor-map" class="map-stage floor-map"></div>
+            <aside id="region-panel" class="region-panel">
+              <p class="eyebrow">SELECT AN AREA</p>
+              <h3>Live room conditions</h3>
+              <p>Click a highlighted region on the map to inspect its mapped FAV temperature.</p>
+            </aside>
+          </div>
+        </section>
+      </section>
+
+      <section id="requests-section" class="view-section" hidden>
+        <header class="page-heading">
+          <div><p class="eyebrow">SERVICE DESK</p><h1>Maintenance requests</h1><p>Requests are filtered to the spaces assigned to your account.</p></div>
+          <button id="refresh-requests-button" class="secondary-button" type="button">Refresh</button>
+        </header>
+        <div class="requests-layout">
+          <div id="request-list" class="request-list"></div>
+          <aside id="request-detail" class="request-detail"><p class="empty-state">Select a request to view details.</p></aside>
+        </div>
+      </section>
+
+      <section id="admin-section" class="view-section" hidden>
+        <header class="page-heading">
+          <div><p class="eyebrow">ADMINISTRATION</p><h1>Spaces, maps, and access</h1><p>Build the site hierarchy, simplify drawings, map FAV points, and assign account scopes.</p></div>
+        </header>
+        <div class="admin-tabs" role="tablist">
+          <button class="admin-tab active" data-admin-view="structure" type="button">Buildings & floors</button>
+          <button class="admin-tab" data-admin-view="maps" type="button">Floor-plan editor</button>
+          <button class="admin-tab" data-admin-view="users" type="button">Users & access</button>
+          <button id="admin-metasys-tab" class="admin-tab" data-admin-view="metasys" type="button">Metasys connection</button>
+        </div>
+
+        <section id="admin-structure" class="admin-pane">
+          <div class="admin-grid">
+            <form id="building-form" class="admin-card">
+              <p class="eyebrow">SITE STRUCTURE</p><h2>Building</h2>
+              <input id="building-id" type="hidden">
+              <label>Name<input id="building-name" required maxlength="160" placeholder="Building A"></label>
+              <label>Display order<input id="building-order" type="number" value="0"></label>
+              <div class="form-actions"><button class="primary-button" type="submit">Save building</button><button id="building-clear" class="text-button" type="button">Clear</button></div>
+            </form>
+            <form id="floor-form" class="admin-card">
+              <p class="eyebrow">SITE STRUCTURE</p><h2>Floor</h2>
+              <input id="floor-id" type="hidden">
+              <label>Building<select id="floor-building" required></select></label>
+              <label>Name<input id="floor-name-input" required maxlength="160" placeholder="First floor"></label>
+              <label>Display order<input id="floor-order" type="number" value="0"></label>
+              <div class="form-actions"><button class="primary-button" type="submit">Save floor</button><button id="floor-clear" class="text-button" type="button">Clear</button></div>
+            </form>
+          </div>
+          <div id="structure-list" class="structure-list"></div>
+        </section>
+
+        <section id="admin-maps" class="admin-pane" hidden>
+          <div class="upload-editor-layout">
+            <aside class="editor-sidebar">
+              <form id="floorplan-upload-form" class="admin-card compact-card">
+                <p class="eyebrow">SOURCE DRAWING</p><h2>Upload PDF</h2>
+                <p class="help-text">The first PDF page is rendered locally on this Mac and used unchanged as the drawing background. Add service zones manually in the editor.</p>
+                <label>Map type<select id="plan-scope-type"><option value="floor">Floor plan</option><option value="building">Building overview</option></select></label>
+                <label>Building or floor<select id="plan-scope-id" required></select></label>
+                <label>Map name<input id="plan-name" required maxlength="160" placeholder="Building A · First floor"></label>
+                <label class="file-field">PDF drawing<input id="plan-pdf" type="file" accept="application/pdf,.pdf" required><span id="plan-file-label">Choose a PDF</span></label>
+                <button id="plan-upload-button" class="primary-button" type="submit">Upload PDF background</button>
+                <div id="plan-upload-message" class="form-message" role="status"></div>
+              </form>
+
+              <div class="admin-card compact-card">
+                <p class="eyebrow">EDITOR</p><h2>Zone tools</h2>
+                <label>Edit map<select id="editor-plan-select"></select></label>
+                <label class="toggle-field"><input id="show-original-plan" type="checkbox" checked> Show PDF background</label>
+                <div class="tool-grid">
+                  <button class="tool-button active" data-tool="select" type="button">Select</button>
+                  <button class="tool-button" data-tool="region" type="button">Region</button>
+                </div>
+                <p id="editor-hint" class="help-text">Select a zone to edit it, or choose Region and click around a service area.</p>
+                <div class="form-actions stack-actions">
+                  <button id="finish-region-button" class="secondary-button" type="button" hidden>Finish region boundary</button>
+                  <button id="delete-selection-button" class="danger-button" type="button" disabled>Delete selected item</button>
+                  <button id="save-trace-button" class="primary-button" type="button" hidden>Save drawing lines</button>
+                </div>
+              </div>
+
+              <form id="region-form" class="admin-card compact-card" hidden>
+                <p class="eyebrow">SERVICE AREA</p><h2 id="region-form-title">New region</h2>
+                <input id="region-id" type="hidden">
+                <label>Name<input id="region-name" required maxlength="160" placeholder="Northwest offices"></label>
+                <label>Highlight color<input id="region-color" type="color" value="#2cc7d2"></label>
+                <label>FAV box<input id="region-fav" maxlength="160" placeholder="FAV-1-12"></label>
+                <label>Metasys point reference<input id="region-object-id" maxlength="1024" placeholder="SERVER:DEVICE/FAV.ZN-T"></label>
+                <label>Attribute<input id="region-attribute-id" maxlength="64" value="85"><small>Legacy Present Value is usually 85; REST uses presentValue.</small></label>
+                <div class="form-actions"><button class="primary-button" type="submit">Save region</button><button id="region-cancel" class="text-button" type="button">Cancel</button></div>
+              </form>
+            </aside>
+            <div class="editor-main">
+              <div class="editor-topline"><span id="editor-plan-name">Choose a map to edit</span><span id="editor-selection-label">No selection</span></div>
+              <div id="map-editor" class="map-stage editor-stage"></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="admin-users" class="admin-pane" hidden>
+          <div class="users-layout">
+            <form id="user-form" class="admin-card user-form">
+              <p class="eyebrow">ACCOUNT</p><h2 id="user-form-title">Create user</h2>
+              <input id="user-id" type="hidden">
+              <label>Display name<input id="user-display-name" required maxlength="120"></label>
+              <label>Email<input id="user-email" type="email" required maxlength="254"></label>
+              <label>Role<select id="user-role"><option value="viewOnly">View only</option><option value="reportingStaff">Reporting staff</option><option value="operator">Operator</option><option value="admin">Admin</option></select></label>
+              <label>Password<input id="user-password" type="password" autocomplete="new-password" minlength="12" maxlength="256"><small id="user-password-help">Required for a new account; 12 characters minimum.</small></label>
+              <label class="toggle-field"><input id="user-active" type="checkbox" checked> Account active</label>
+              <fieldset id="user-scopes"><legend>Assigned floors and regions</legend><p class="help-text">View-only and reporting staff see only checked spaces. Selecting a floor grants every region on that floor.</p><div id="scope-list" class="scope-list"></div></fieldset>
+              <div class="form-actions"><button class="primary-button" type="submit">Save user</button><button id="user-clear" class="text-button" type="button">Clear</button></div>
+              <div id="user-form-message" class="form-message" role="status"></div>
+            </form>
+            <div id="user-list" class="user-list"></div>
+          </div>
+        </section>
+
+        <section id="admin-metasys" class="admin-pane" hidden>
+          <form id="admin-metasys-form" class="admin-card connection-form">
+            <p class="eyebrow">LIVE BUILDING DATA</p><h2>Metasys connection</h2>
+            <p class="help-text">Available only from a browser on this Mac. Saving first tests the credentials; passwords go directly to macOS Keychain and are never stored in this database or repository.</p>
+            <label>Server URL<input id="admin-metasys-server-url" type="url" required maxlength="2048" placeholder="https://metasys.example.local"></label>
+            <label>Username<input id="admin-metasys-username" autocomplete="username" required maxlength="256"></label>
+            <label>Password<input id="admin-metasys-password" type="password" autocomplete="current-password" required maxlength="1024"><small>Enter the password each time settings are changed.</small></label>
+            <label>Confirm password<input id="admin-metasys-password-confirmation" type="password" autocomplete="current-password" required maxlength="1024"></label>
+            <div class="form-grid">
+              <label>Connector<select id="admin-metasys-connector"><option value="auto">Auto detect</option><option value="legacy">Legacy UI</option><option value="rest">REST API</option></select></label>
+              <label>API version<select id="admin-metasys-api-version"><option value="auto">Auto detect</option><option value="v2">v2</option><option value="v3">v3</option><option value="v4">v4</option><option value="v5">v5</option><option value="v6">v6</option></select></label>
+            </div>
+            <label>Legacy domain<input id="admin-metasys-domain" required maxlength="128" value="Metasys Local"></label>
+            <label class="toggle-field"><input id="admin-metasys-invalid-certificates" type="checkbox"> Trust this server's self-signed certificate</label>
+            <p id="admin-metasys-password-state" class="credential-state">Checking Keychain state…</p>
+            <div id="admin-metasys-message" class="form-message" role="status" aria-live="polite"></div>
+            <button id="admin-metasys-button" class="primary-button" type="submit">Test connection and save</button>
+          </form>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="report-dialog" class="modal-dialog">
+    <form id="report-form" method="dialog">
+      <header><div><p class="eyebrow">NEW SERVICE REQUEST</p><h2 id="report-region-name">Report an issue</h2></div><button id="report-close" class="icon-button" type="button" aria-label="Close">×</button></header>
+      <input id="report-region-id" type="hidden">
+      <label>Contact email<input id="report-contact-email" type="email" required maxlength="254"></label>
+      <label>Type of issue<select id="report-issue-type" required><option value="too_hot">Too hot</option><option value="too_cold">Too cold</option><option value="lighting">Lighting</option><option value="water_leak">Water leak</option><option value="noise">Noise</option><option value="broken_toilet">Broken toilet</option><option value="air_quality">Air quality</option><option value="other">Other</option></select></label>
+      <label>Details<textarea id="report-details" rows="5" maxlength="2000" placeholder="Tell the maintenance team what you observed."></textarea></label>
+      <div id="report-message" class="form-message" role="status"></div>
+      <footer><button id="report-cancel" class="secondary-button" type="button">Cancel</button><button class="primary-button" type="submit">Submit request</button></footer>
+    </form>
+  </dialog>
+</body>
+</html>

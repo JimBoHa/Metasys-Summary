@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Result;
 use chrono::Utc;
@@ -6,16 +6,20 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::{
     analytics,
-    config::Config,
+    config::{
+        Config, MetasysConnectionResult, MetasysConnectionUpdate, MetasysConnectionView,
+        store_password,
+    },
     email_reports::{
         EmailDeliveryResult, EmailReportSettings, EmailReportSettingsUpdate,
         EmailReportSettingsView, clear_smtp_password, send_report, set_smtp_password, test_smtp,
     },
     metasys::MetasysClient,
-    models::{AlarmRecord, DashboardView, HealthView, OverrideRecord},
+    models::{AlarmRecord, DashboardView, HealthView, OverrideRecord, PollData},
+    portal::models::{PortalMapView, PortalUserRecord, TemperatureReading},
     sql_trends::{
-        SqlTrendSettingsUpdate, SqlTrendSettingsView, TrendResponse, clear_sql_password,
-        fetch_trends, set_sql_password, test_connection,
+        SqlTrendSettingsUpdate, SqlTrendSettingsView, TrendPointCatalog, TrendResponse,
+        clear_sql_password, fetch_trend_points, fetch_trends, set_sql_password, test_connection,
     },
     store::Store,
 };
@@ -27,25 +31,34 @@ struct LiveData {
     overrides: Vec<OverrideRecord>,
 }
 
+#[derive(Clone)]
+struct CachedTemperature {
+    mapping_key: String,
+    reading: TemperatureReading,
+    cached_at: chrono::DateTime<Utc>,
+}
+
 pub struct AppState {
-    pub config: Arc<Config>,
+    config: RwLock<Arc<Config>>,
     store: Arc<Store>,
-    client: MetasysClient,
+    client: RwLock<Arc<MetasysClient>>,
     live: RwLock<LiveData>,
     poll_lock: Mutex<()>,
     report_send_lock: Mutex<()>,
+    temperature_cache: RwLock<HashMap<String, CachedTemperature>>,
 }
 
 impl AppState {
     pub fn new(config: Arc<Config>, store: Arc<Store>) -> Result<Self> {
-        let client = MetasysClient::new(config.clone())?;
+        let client = Arc::new(MetasysClient::new(config.clone())?);
         Ok(Self {
-            config,
+            config: RwLock::new(config),
             store,
-            client,
+            client: RwLock::new(client),
             live: RwLock::new(LiveData::default()),
             poll_lock: Mutex::new(()),
             report_send_lock: Mutex::new(()),
+            temperature_cache: RwLock::new(HashMap::new()),
         })
     }
 
@@ -62,44 +75,56 @@ impl AppState {
             }
         }
 
-        match self.client.fetch().await {
+        let client = self.client.read().await.clone();
+        let history_days = self.config.read().await.history_days;
+        match client.fetch().await {
             Ok(data) => {
-                if let Err(error) = self.store.upsert_alarms(&data.alarms) {
+                if let Err(error) = self
+                    .apply_successful_poll(data, attempted_at, history_days)
+                    .await
+                {
                     self.record_failure(error).await;
-                    return;
                 }
-                if let Err(error) = self.store.record_poll(
-                    true,
-                    data.active_alarms.len(),
-                    data.overrides.len(),
-                    None,
-                ) {
-                    tracing::warn!(error = %error, "failed to record successful poll");
-                }
-                if let Err(error) = self.store.prune(self.config.history_days + 7) {
-                    tracing::warn!(error = %error, "failed to prune dashboard history");
-                }
-
-                let is_demo = data.connector == "Demo data";
-                let mut live = self.live.write().await;
-                live.health = HealthView {
-                    state: if is_demo { "demo" } else { "ok" }.to_owned(),
-                    message: if is_demo {
-                        "Showing generated demonstration data".to_owned()
-                    } else {
-                        "Metasys data current".to_owned()
-                    },
-                    connector: data.connector,
-                    server_version: data.server_version,
-                    last_success_at: Some(Utc::now()),
-                    last_attempt_at: Some(attempted_at),
-                    history_started_at: live.health.history_started_at,
-                };
-                live.active_alarms = data.active_alarms;
-                live.overrides = data.overrides;
             }
             Err(error) => self.record_failure(error).await,
         }
+    }
+
+    async fn apply_successful_poll(
+        &self,
+        data: PollData,
+        attempted_at: chrono::DateTime<Utc>,
+        history_days: i64,
+    ) -> Result<()> {
+        self.store.upsert_alarms(&data.alarms)?;
+        if let Err(error) =
+            self.store
+                .record_poll(true, data.active_alarms.len(), data.overrides.len(), None)
+        {
+            tracing::warn!(error = %error, "failed to record successful poll");
+        }
+        if let Err(error) = self.store.prune(history_days + 7) {
+            tracing::warn!(error = %error, "failed to prune dashboard history");
+        }
+
+        let is_demo = data.connector == "Demo data";
+        let mut live = self.live.write().await;
+        live.health = HealthView {
+            state: if is_demo { "demo" } else { "ok" }.to_owned(),
+            message: if is_demo {
+                "Showing generated demonstration data".to_owned()
+            } else {
+                "Metasys data current".to_owned()
+            },
+            connector: data.connector,
+            server_version: data.server_version,
+            last_success_at: Some(Utc::now()),
+            last_attempt_at: Some(attempted_at),
+            history_started_at: live.health.history_started_at,
+        };
+        live.active_alarms = data.active_alarms;
+        live.overrides = data.overrides;
+        Ok(())
     }
 
     async fn record_failure(&self, error: anyhow::Error) {
@@ -123,13 +148,95 @@ impl AppState {
 
     pub async fn dashboard(&self) -> Result<DashboardView> {
         let live = self.live.read().await;
+        let history_days = self.config.read().await.history_days;
         analytics::build_dashboard(
             &self.store,
             live.health.clone(),
             &live.active_alarms,
             &live.overrides,
-            self.config.history_days,
+            history_days,
         )
+    }
+
+    pub async fn metasys_connection_settings(&self) -> MetasysConnectionView {
+        let config = self.config.read().await;
+        config
+            .metasys_connection_settings()
+            .view(config.password.is_some())
+    }
+
+    pub async fn hydrate_metasys_password(
+        &self,
+        expected_service: &str,
+        expected_username: &str,
+        password: String,
+    ) -> Result<bool> {
+        let _poll_guard = self.poll_lock.lock().await;
+        let current_config = self.config.read().await.clone();
+        if current_config.password.is_some()
+            || current_config.keychain_service != expected_service
+            || current_config.username != expected_username
+        {
+            return Ok(false);
+        }
+        let mut replacement_config = current_config.as_ref().clone();
+        replacement_config.password = Some(password);
+        let replacement_config = Arc::new(replacement_config);
+        let replacement_client = Arc::new(MetasysClient::new(replacement_config.clone())?);
+        *self.config.write().await = replacement_config;
+        *self.client.write().await = replacement_client;
+        Ok(true)
+    }
+
+    pub async fn update_metasys_connection(
+        &self,
+        update: MetasysConnectionUpdate,
+    ) -> Result<MetasysConnectionResult> {
+        let (settings, password) = update.validated()?;
+        let _poll_guard = self.poll_lock.lock().await;
+        let current_config = self.config.read().await.clone();
+        let mut replacement_config = current_config.as_ref().clone();
+        replacement_config.apply_metasys_connection(&settings, Some(password.clone()));
+        let replacement_config = Arc::new(replacement_config);
+        let replacement_client = Arc::new(MetasysClient::new(replacement_config.clone())?);
+        let attempted_at = Utc::now();
+        let data = replacement_client
+            .fetch()
+            .await
+            .map_err(metasys_connection_test_failure)?;
+        if data.connector == "Demo data" {
+            anyhow::bail!("production connection returned demo data");
+        }
+
+        let keychain_service = replacement_config.keychain_service.clone();
+        let keychain_username = settings.username.clone();
+        tokio::task::spawn_blocking(move || {
+            store_password(&keychain_service, &keychain_username, &password)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("Keychain task failed: {error}"))??;
+        self.store.save_metasys_connection_settings(&settings)?;
+
+        let connector = data.connector.clone();
+        let server_version = data.server_version.clone();
+        let alarm_records = data.alarms.len();
+        let active_alarms = data.active_alarms.len();
+        let overrides = data.overrides.len();
+        let history_days = replacement_config.history_days;
+        *self.config.write().await = replacement_config;
+        *self.client.write().await = replacement_client;
+        self.temperature_cache.write().await.clear();
+        self.apply_successful_poll(data, attempted_at, history_days)
+            .await?;
+
+        Ok(MetasysConnectionResult {
+            settings: settings.view(true),
+            connector,
+            server_version,
+            alarm_records,
+            active_alarms,
+            overrides,
+        })
     }
 
     pub async fn health(&self) -> HealthView {
@@ -244,8 +351,121 @@ impl AppState {
         test_connection(&settings).await
     }
 
-    pub async fn sql_trends(&self, hours: i64) -> Result<TrendResponse> {
+    pub async fn sql_trend_points(&self) -> Result<TrendPointCatalog> {
         let settings = self.store.sql_trend_settings()?;
-        fetch_trends(&settings, hours).await
+        fetch_trend_points(&settings).await
+    }
+
+    pub async fn sql_trends(&self, hours: i64, point_slice_ids: &[i32]) -> Result<TrendResponse> {
+        let settings = self.store.sql_trend_settings()?;
+        fetch_trends(&settings, hours, point_slice_ids).await
+    }
+
+    pub(crate) fn store(&self) -> &Store {
+        &self.store
+    }
+
+    pub async fn portal_map(&self, user: &PortalUserRecord) -> Result<PortalMapView> {
+        let mut map = self.store.portal_map(user)?;
+        for building in &mut map.buildings {
+            for floor in &mut building.floors {
+                for region in &mut floor.regions {
+                    let Some(record) = self.store.region_record(&region.id)? else {
+                        continue;
+                    };
+                    if record.metasys_object_id.trim().is_empty() {
+                        continue;
+                    }
+                    region.temperature = Some(self.temperature_for_region(&record).await);
+                }
+            }
+        }
+        Ok(map)
+    }
+
+    pub async fn temperature_for_region(
+        &self,
+        region: &crate::portal::models::RegionRecord,
+    ) -> TemperatureReading {
+        let mapping_key = format!(
+            "{}:{}",
+            region.metasys_object_id, region.metasys_attribute_id
+        );
+        if let Some(cached) = self.temperature_cache.read().await.get(&region.id)
+            && cached.mapping_key == mapping_key
+            && Utc::now() - cached.cached_at < chrono::Duration::seconds(30)
+        {
+            return cached.reading.clone();
+        }
+        let client = self.client.read().await.clone();
+        let reading = match client
+            .read_temperature(&region.metasys_object_id, &region.metasys_attribute_id)
+            .await
+        {
+            Ok(reading) => reading,
+            Err(error) => {
+                tracing::warn!(region_id = %region.id, error = %error, "Metasys temperature read failed");
+                TemperatureReading {
+                    value: None,
+                    display_value: "Unavailable".to_owned(),
+                    unit: String::new(),
+                    status: "Unavailable".to_owned(),
+                    observed_at: Utc::now(),
+                    available: false,
+                    error: Some("Live temperature is temporarily unavailable".to_owned()),
+                }
+            }
+        };
+        self.temperature_cache.write().await.insert(
+            region.id.clone(),
+            CachedTemperature {
+                mapping_key,
+                reading: reading.clone(),
+                cached_at: Utc::now(),
+            },
+        );
+        reading
+    }
+}
+
+fn metasys_connection_test_failure(error: anyhow::Error) -> anyhow::Error {
+    let details = format!("{error:#}");
+    let normalized = details.to_ascii_lowercase();
+    let certificate_failure = ["certificate", "unknown issuer", "unknown ca"]
+        .iter()
+        .any(|needle| normalized.contains(needle));
+
+    if certificate_failure {
+        anyhow::anyhow!(
+            "Metasys connection test failed: TLS certificate validation failed. If this is the expected private Metasys server, select “Trust this server's self-signed certificate” and retry."
+        )
+    } else {
+        anyhow::anyhow!("Metasys connection test failed: {details}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::metasys_connection_test_failure;
+
+    #[test]
+    fn connection_test_failure_explains_self_signed_certificate() {
+        let source = anyhow::anyhow!("invalid peer certificate: UnknownIssuer")
+            .context("connect to legacy Metasys UI login");
+
+        let message = metasys_connection_test_failure(source).to_string();
+
+        assert!(message.contains("TLS certificate validation failed"));
+        assert!(message.contains("Trust this server's self-signed certificate"));
+    }
+
+    #[test]
+    fn connection_test_failure_preserves_non_certificate_cause_chain() {
+        let source =
+            anyhow::anyhow!("connection refused").context("connect to legacy Metasys UI login");
+
+        let message = metasys_connection_test_failure(source).to_string();
+
+        assert!(message.contains("connect to legacy Metasys UI login: connection refused"));
     }
 }

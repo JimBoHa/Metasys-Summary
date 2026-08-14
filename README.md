@@ -1,6 +1,6 @@
-# Metasys Operations Dashboard
+# Metasys Operations and Maintenance Portal
 
-Native Rust service for macOS with a responsive LAN/local web dashboard. It monitors Johnson Controls Metasys alarm activity and operator overrides, persists history in SQLite, and calculates equipment risk locally.
+Native Rust service for macOS with authenticated maintenance and operations web interfaces. It monitors Johnson Controls Metasys alarm activity and operator overrides, overlays live temperatures on editable floor plans, tracks scoped service requests, persists history in SQLite, and calculates equipment risk locally.
 
 Licensed under the [MIT License](LICENSE).
 
@@ -12,13 +12,21 @@ Copy `config.example.toml` to:
 ~/Library/Application Support/Metasys Dashboard/config.toml
 ```
 
-Set `server_url` and `username` for your site. Store the password in macOS Keychain; never put it in the TOML file:
+The TOML file controls service options such as bind address, port, polling interval, and database location. Start the service and open `http://127.0.0.1:3030` to configure the Metasys server URL, username, password, connector, API version, domain, and certificate policy in the browser. The app tests the connection before saving; the password goes directly to macOS Keychain and never enters TOML or SQLite.
+
+The hidden Terminal prompt remains available as a recovery option:
 
 ```bash
 cargo run -- configure
 ```
 
 The password is never written to this repository, the TOML configuration, SQLite, or logs.
+
+Use the second step of the browser setup page to create the initial administrator. For security, connection and first-administrator setup are not available over the LAN. The terminal command remains available as a recovery option:
+
+```bash
+cargo run -- portal-admin --email you@example.com --name "Your Name"
+```
 
 ## Run
 
@@ -27,13 +35,15 @@ cargo run -- check
 cargo run
 ```
 
-Open `http://127.0.0.1:3030`. To allow other local-network devices, set `bind_address = "0.0.0.0"`; then open `http://<this-mac-ip>:3030` after macOS Firewall allows incoming connections.
+Open `http://127.0.0.1:3030` for the maintenance portal. Administrators and operators can open the alarm dashboard at `http://127.0.0.1:3030/operations`. To allow other local-network devices, set `bind_address = "0.0.0.0"`; then open `http://<this-mac-ip>:3030` after macOS Firewall allows incoming connections.
 
 To preview the complete dashboard without Metasys:
 
 ```bash
 cargo run -- --demo --open-browser
 ```
+
+Demo mode uses a separate `dashboard-demo.sqlite3` database unless `METASYS_DATABASE_PATH` is explicitly set. Generated alarms never enter the production database.
 
 ## Build the macOS app
 
@@ -52,6 +62,12 @@ Optional login-time background service:
 
 ## Dashboard sections
 
+- Whole-building and floor views based on administrator-uploaded PDF plans
+- PDF plans displayed directly as map backgrounds with manually drawn service regions
+- Named service regions with FAV and Metasys point mappings
+- Live Metasys temperature overlays with no generated-data fallback
+- Scoped admin, view-only, operator, and reporting-staff accounts
+- Service requests with contact email, issue type, status, and operator notes
 - Current active alarms, sorted by Metasys priority (lower numbers are more serious)
 - Most frequent alarms in the rolling 30-day index
 - Most serious alarms in the rolling 30-day index
@@ -60,9 +76,17 @@ Optional login-time background service:
 - Fourteen-day daily alarm chart with a seven-day rolling mean
 - Alarm-type and equipment-share donut charts
 - Configurable encrypted email reports with manual, daily, weekday, or weekly delivery
-- Optional Microsoft SQL Server trend chart with selectable 24-hour to 30-day ranges
+- Optional Microsoft SQL Server historian browser and trend chart with selectable 24-hour to 5-year ranges
 
 Modern Metasys REST versions v2-v6 are auto-detected. REST v5/v6 uses activities; v2-v4 uses alarm collections with version-appropriate filters. The legacy connector uses Alarm Manager for events and Potential Problem Areas for overrides. SQLite deduplicates event IDs across polls, so the local 30-day index improves continuously even when an older Metasys endpoint returns a limited initial history.
+
+## Maintenance portal
+
+Administrators create buildings and floors, upload a building-overview PDF and floor PDFs as backgrounds, draw named service regions, map each region to its FAV/temperature point, and assign user access. Reporting staff can view assigned spaces and submit requests; view-only staff cannot submit; operators can see all spaces and update requests; administrators have full control.
+
+Administrators working from the host Mac can update and test the live Metasys connection under **Administration → Metasys connection**. A successful save activates the new client immediately without restarting the service.
+
+PDFs are processed locally on macOS and are not sent to an external service. See [maintenance portal setup](docs/maintenance-portal.md).
 
 ## Email reports
 
@@ -72,7 +96,9 @@ Passwords stay in macOS Keychain. Only encrypted SMTP transports are supported: 
 
 ## SQL trend source
 
-Open **SQL Trends** from a browser on the host Mac. Configure the SQL Server hostname or IP, port, database, read-only username, password, certificate policy, and mapping query. The password is stored only in macOS Keychain; non-secret settings are stored in the dashboard SQLite database. Settings endpoints reject non-loopback clients.
+Open **SQL Trends** from a browser on the host Mac. Configure the SQL Server hostname or IP, port, database, read-only username, password, certificate policy, and optional legacy-TLS compatibility. The password is stored only in macOS Keychain; non-secret settings are stored in the dashboard SQLite database. Settings endpoints reject non-loopback clients.
+
+Operators can load the Metasys historian point catalog, search by equipment or point name, select up to eight points, and graph up to 5,000 samples over a 24-hour to 5-year window. Current Metasys historian tables are queried directly with bounded, parameterized `SELECT` statements. No remote database content is modified or copied locally.
 
 The mapping query must be one read-only `SELECT` or `WITH` statement, use `@P1` and `@P2` for UTC start/end bounds, and return these aliases:
 
@@ -81,7 +107,7 @@ The mapping query must be one read-only `SELECT` or `WITH` statement, use `@P1` 
 - `sample_value` as a numeric value
 - `unit` as text or `NULL`
 
-Metasys repository schemas vary. A stable read-only compatibility view is recommended. See [SQL trend setup](docs/sql-trends.md).
+Metasys repository schemas vary. The advanced query remains available for compatibility views and site-specific reporting. See [SQL trend setup](docs/sql-trends.md).
 
 ## Environment overrides
 
@@ -100,7 +126,9 @@ Metasys repository schemas vary. A stable read-only compatibility view is recomm
 ## Security and operations
 
 - Connector is read-only. It does not acknowledge/discard alarms, command points, or release overrides.
-- LAN dashboard has no separate login. Bind to `127.0.0.1` unless the building network segment is trusted and access-controlled.
+- Both web interfaces require a maintenance-portal account. Passwords use salted Argon2id hashes; sessions are time-limited, HTTP-only, same-site cookies and state-changing requests require a CSRF token.
+- Plain HTTP does not encrypt credentials in transit. Bind to `127.0.0.1`, use a trusted and access-controlled building network, or terminate HTTPS at a trusted reverse proxy before allowing LAN access.
+- Floor, region, floor-plan, temperature, and service-request APIs enforce the signed-in user's role and assigned scope on the server.
 - Email configuration and sending are restricted to loopback clients; report recipients and delivery status are not exposed to LAN clients.
 - SQL settings and connection testing are restricted to loopback clients. Trend results remain visible wherever the dashboard is visible.
 - Certificate validation is enabled by default. Use `accept_invalid_certificates = true` only for an isolated deployment whose private certificate cannot yet be trusted.
