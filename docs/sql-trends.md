@@ -20,11 +20,13 @@ The password is stored in macOS Keychain. Non-secret settings are stored in the 
 
 Open **Trend analysis** at `/trends` (administrator or operator account):
 
-1. Search by controller, equipment, point name, or engineering unit.
+1. Filter by point family or equipment type, or search by controller, equipment, point name, or engineering unit.
 2. Select up to eight points.
-3. Choose a preset or custom range of up to 10 years.
+3. Choose a preset, including 3-year and 5-year views, or a custom range of up to 10 years.
 4. Leave resolution on **Automatic**, or request a specific time bucket.
 5. Select **Graph selected points**.
+
+The catalog derives a readable equipment name and point family from each Metasys historian reference. When zone temperatures exist, the initial view filters to `ZN-T` across all equipment so the complete zone-temperature catalog is visible. Named terminal boxes sort first, and the equipment filter can narrow the results to terminal boxes, water-source heat pumps, other named equipment, or Metasys internal identifiers. Common HVAC families such as `ZN-T`, `SA-T`, `SA-F`, `SF-C`, `SF-S`, `DA-T`, `HWV-O`, and `HTG-O` are labeled and counted separately; other discovered suffixes remain searchable.
 
 Queries use the indexed historian `PointSliceID` and UTC timestamp fields. Selected points are averaged into time buckets across the requested period, then displayed chronologically. The server automatically raises an overly fine requested resolution to keep responses within 5,000 samples.
 

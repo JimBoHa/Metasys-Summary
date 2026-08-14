@@ -1,7 +1,15 @@
 "use strict";
 
 const COLORS = ["#2cc7d2", "#f2b84b", "#9a8cff", "#53d18b", "#ef7278", "#62a8e5", "#ef9f62", "#d27bc5"];
-const MAX_RENDERED_POINTS = 300;
+const POINT_PAGE_SIZE = 300;
+const FEATURED_POINT_FAMILIES = ["ZN-T", "SA-T", "SA-F", "SF-C", "SF-S", "DA-T", "HWV-O", "HTG-O", "CLG-O", "ZN-SP", "RA-T", "OA-T", "MA-T", "DMP-O"];
+const POINT_FAMILY_LABELS = {
+  "ZN-T": "Zone temperature", "SA-T": "Supply-air temperature", "SA-F": "Supply-air flow",
+  "SF-C": "Supply-fan command", "SF-S": "Supply-fan status", "DA-T": "Discharge-air temperature",
+  "HWV-O": "Hot-water valve output", "HTG-O": "Heating output", "CLG-O": "Cooling output",
+  "ZN-SP": "Zone setpoint", "RA-T": "Return-air temperature", "OA-T": "Outdoor-air temperature",
+  "MA-T": "Mixed-air temperature", "DMP-O": "Damper output"
+};
 const state = {
   session: null,
   points: [],
@@ -12,7 +20,11 @@ const state = {
   zoom: null,
   dragStartX: null,
   layout: null,
-  tableRendered: false
+  tableRendered: false,
+  familyFilter: "all",
+  equipmentFilter: "all",
+  pointRenderLimit: POINT_PAGE_SIZE,
+  catalogInitialized: false
 };
 
 const $ = (id) => document.getElementById(id);
@@ -36,7 +48,19 @@ document.addEventListener("DOMContentLoaded", async () => {
 });
 
 function bindEvents() {
-  $("point-search").addEventListener("input", renderPointCatalog);
+  $("point-search").addEventListener("input", resetPointCatalogView);
+  $("point-family-filter").addEventListener("change", () => {
+    state.familyFilter = $("point-family-filter").value;
+    resetPointCatalogView();
+  });
+  $("equipment-kind-filter").addEventListener("change", () => {
+    state.equipmentFilter = $("equipment-kind-filter").value;
+    resetPointCatalogView();
+  });
+  $("show-more-points-button").addEventListener("click", () => {
+    state.pointRenderLimit += POINT_PAGE_SIZE;
+    renderPointCatalog();
+  });
   $("reload-points-button").addEventListener("click", loadPointCatalog);
   $("load-trends-button").addEventListener("click", loadTrends);
   $("display-mode").addEventListener("change", () => {
@@ -75,9 +99,10 @@ async function loadPointCatalog() {
   $("point-results").replaceChildren(element("p", "empty-state", "Loading historian catalog…"));
   try {
     const catalog = await fetchJson("/api/trend-points");
-    state.points = catalog.points || [];
+    state.points = (catalog.points || []).map(normalizeCatalogPoint);
+    configureCatalogFilters();
     $("catalog-count").textContent = `${formatInteger(state.points.length)} point${state.points.length === 1 ? "" : "s"}${catalog.truncated ? "+" : ""}`;
-    renderPointCatalog();
+    resetPointCatalogView();
     showMessage(catalog.truncated ? "The point catalog reached its 10,000-point display limit. Refine the source database if a point is missing." : "");
   } catch (error) {
     state.points = [];
@@ -89,13 +114,60 @@ async function loadPointCatalog() {
   }
 }
 
+function configureCatalogFilters() {
+  const familyCounts = countBy(state.points, (point) => point.pointFamily || "Unclassified");
+  const familyOptions = [option("all", `All families (${formatInteger(state.points.length)})`)];
+  const featured = FEATURED_POINT_FAMILIES.filter((family) => familyCounts.has(family));
+  for (const family of featured) {
+    familyOptions.push(option(family, `${family} · ${pointFamilyLabel(family)} (${formatInteger(familyCounts.get(family))})`));
+  }
+  const additional = [...familyCounts.entries()]
+    .filter(([family]) => family !== "Unclassified" && !FEATURED_POINT_FAMILIES.includes(family))
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0], undefined, { numeric: true }))
+    .slice(0, 25);
+  for (const [family, count] of additional) familyOptions.push(option(family, `${family} (${formatInteger(count)})`));
+  $("point-family-filter").replaceChildren(...familyOptions);
+
+  const equipmentCounts = countBy(state.points, equipmentKind);
+  $("equipment-kind-filter").replaceChildren(
+    option("all", `All equipment (${formatInteger(state.points.length)})`),
+    option("terminalBox", `Terminal boxes (${formatInteger(equipmentCounts.get("terminalBox") || 0)})`),
+    option("wshp", `Heat pumps / WSHP (${formatInteger(equipmentCounts.get("wshp") || 0)})`),
+    option("named", `Named equipment (${formatInteger(equipmentCounts.get("named") || 0)})`),
+    option("internal", `Internal IDs (${formatInteger(equipmentCounts.get("internal") || 0)})`)
+  );
+
+  if (!state.catalogInitialized) {
+    state.familyFilter = familyCounts.has("ZN-T") ? "ZN-T" : "all";
+    state.equipmentFilter = "all";
+    state.catalogInitialized = true;
+  }
+  if (![...$("point-family-filter").options].some((item) => item.value === state.familyFilter)) state.familyFilter = "all";
+  $("point-family-filter").value = state.familyFilter;
+  $("equipment-kind-filter").value = state.equipmentFilter;
+
+  const equipment = new Set(state.points.map((point) => point.equipmentPath).filter(Boolean)).size;
+  const zoneTemperatures = familyCounts.get("ZN-T") || 0;
+  const terminalBoxPoints = equipmentCounts.get("terminalBox") || 0;
+  $("catalog-summary").textContent = `${formatInteger(equipment)} equipment references · ${formatInteger(zoneTemperatures)} ZN-T · ${formatInteger(terminalBoxPoints)} terminal-box points`;
+}
+
+function resetPointCatalogView() {
+  state.pointRenderLimit = POINT_PAGE_SIZE;
+  renderPointCatalog();
+}
+
 function renderPointCatalog() {
   const query = $("point-search").value.trim().toLocaleLowerCase();
-  const matches = state.points.filter((point) => {
-    if (!query) return true;
-    return `${point.pointName} ${point.unit || ""}`.toLocaleLowerCase().includes(query);
-  });
-  const visible = matches.slice(0, MAX_RENDERED_POINTS);
+  const matches = state.points
+    .filter((point) => {
+      if (state.familyFilter !== "all" && point.pointFamily !== state.familyFilter) return false;
+      if (state.equipmentFilter !== "all" && equipmentKind(point) !== state.equipmentFilter) return false;
+      if (!query) return true;
+      return `${point.pointName} ${point.equipmentName} ${point.equipmentPath} ${point.pointFamily} ${pointFamilyLabel(point.pointFamily)} ${point.unit || ""}`.toLocaleLowerCase().includes(query);
+    })
+    .sort(compareCatalogPoints);
+  const visible = matches.slice(0, state.pointRenderLimit);
   const fragment = document.createDocumentFragment();
   for (const point of visible) {
     const selected = state.selected.has(point.pointSliceId);
@@ -108,14 +180,19 @@ function renderPointCatalog() {
     const check = element("span", "point-check", selected ? "✓" : "");
     check.setAttribute("aria-hidden", "true");
     const copy = element("span", "point-copy");
-    copy.append(element("strong", "", point.pointName), element("small", "", `${point.unit || "No unit"} · PointSlice ${point.pointSliceId}`));
+    copy.append(
+      element("strong", "", pointDisplayName(point)),
+      element("small", "", `${pointFamilyLabel(point.pointFamily)} · ${point.unit || "No unit"} · Slice ${point.pointSliceId}`),
+      element("code", "", point.pointName)
+    );
     row.append(check, copy);
     row.addEventListener("click", () => togglePoint(point));
     fragment.append(row);
   }
   if (!visible.length) fragment.append(element("p", "empty-state", state.points.length ? "No points match this search." : "No historian points are available."));
   $("point-results").replaceChildren(fragment);
-  $("result-count").textContent = matches.length > MAX_RENDERED_POINTS ? `${MAX_RENDERED_POINTS} of ${formatInteger(matches.length)} shown` : `${formatInteger(matches.length)} shown`;
+  $("result-count").textContent = matches.length > visible.length ? `${formatInteger(visible.length)} of ${formatInteger(matches.length)}` : `${formatInteger(matches.length)} shown`;
+  $("show-more-points-button").hidden = visible.length >= matches.length;
 }
 
 function togglePoint(point) {
@@ -144,10 +221,10 @@ function renderSelectedPoints() {
   for (const point of state.selected.values()) {
     const chip = element("span", "point-chip");
     chip.title = point.pointName;
-    chip.append(element("span", "", point.pointName));
+    chip.append(element("span", "", pointDisplayName(point)));
     const remove = element("button", "", "×");
     remove.type = "button";
-    remove.setAttribute("aria-label", `Remove ${point.pointName}`);
+    remove.setAttribute("aria-label", `Remove ${pointDisplayName(point)}`);
     remove.addEventListener("click", () => togglePoint(point));
     chip.append(remove);
     fragment.append(chip);
@@ -236,7 +313,7 @@ function renderLegend() {
     const item = element("span", "legend-item");
     const swatch = element("i");
     swatch.style.background = COLORS[index % COLORS.length];
-    item.append(swatch, element("span", "", series.name), element("small", "", series.unit || "No unit"));
+    item.append(swatch, element("span", "", seriesDisplayName(series.name)), element("small", "", series.unit || "No unit"));
     item.title = series.name;
     fragment.append(item);
   }
@@ -256,7 +333,7 @@ function renderStatistics() {
     const marker = element("i");
     marker.style.background = COLORS[index % COLORS.length];
     const title = document.createElement("div");
-    title.append(element("h3", "", series.name), element("small", "", `${formatInteger(series.statistics.count)} samples · ${series.unit || "No unit"}`));
+    title.append(element("h3", "", seriesDisplayName(series.name)), element("small", "", `${formatInteger(series.statistics.count)} samples · ${series.unit || "No unit"}`));
     header.append(marker, title);
     const values = element("div", "stat-values");
     const unit = series.unit || "";
@@ -289,7 +366,8 @@ function processedSeries() {
       ? smoothed.map((sample) => ({ timestamp: sample.timestamp, value: ((sample.value - base) / Math.abs(base)) * 100 }))
       : smoothed;
     return {
-      name: series.name,
+      name: seriesDisplayName(series.name),
+      sourceName: series.name,
       unit: normalized ? "% change" : (series.unit || "Value"),
       color: COLORS[index % COLORS.length],
       samples
@@ -543,7 +621,7 @@ function renderDataTable() {
     const tableRow = document.createElement("tr");
     tableRow.append(
       element("td", "", formatDateTime(row.timestamp)),
-      element("td", "", row.name),
+      element("td", "", row.displayName),
       element("td", "", formatNumber(row.value)),
       element("td", "", row.unit || "")
     );
@@ -575,6 +653,7 @@ function rawRows() {
   return (state.response?.series || []).flatMap((series) => series.samples.map((sample) => ({
     timestamp: sample.timestamp,
     name: series.name,
+    displayName: seriesDisplayName(series.name),
     value: sample.value,
     unit: series.unit
   }))).sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp) || a.name.localeCompare(b.name));
@@ -633,6 +712,67 @@ function element(tag, className = "", text = "") {
   if (className) node.className = className;
   if (text !== "") node.textContent = text;
   return node;
+}
+
+function option(value, label) {
+  const node = document.createElement("option");
+  node.value = value;
+  node.textContent = label;
+  return node;
+}
+
+function normalizeCatalogPoint(point) {
+  if (point.equipmentName && point.equipmentPath && point.pointFamily) return point;
+  const parts = String(point.pointName || "").trim().split(".");
+  if (parts.length && /^#\d+$/.test(parts.at(-1))) parts.pop();
+  const rawFamily = parts.length > 1 ? parts.pop() : "";
+  const pointFamily = String(rawFamily).trim().replaceAll("_", "-").replaceAll(" ", "-").toLocaleUpperCase();
+  const equipmentPath = parts.join(".").replace(/[./:]+$/, "");
+  const equipmentName = equipmentPath.split(/[/.]/).filter(Boolean).at(-1)?.trim() || "Unassigned equipment";
+  return { ...point, equipmentName, equipmentPath, pointFamily };
+}
+
+function countBy(values, key) {
+  const counts = new Map();
+  for (const value of values) {
+    const item = key(value);
+    counts.set(item, (counts.get(item) || 0) + 1);
+  }
+  return counts;
+}
+
+function equipmentKind(point) {
+  const equipment = String(point.equipmentName || "").toLocaleUpperCase();
+  if (/^TB(?:\d|[-_\s])/.test(equipment)) return "terminalBox";
+  if (equipment.includes("WSHP") || /^HP(?:\d|[-_\s])/.test(equipment)) return "wshp";
+  if (/^[0-9A-F]{6,}$/.test(equipment) || equipment === "UNASSIGNED EQUIPMENT") return "internal";
+  return "named";
+}
+
+function compareCatalogPoints(left, right) {
+  const rank = { terminalBox: 0, wshp: 1, named: 2, internal: 3 };
+  const equipmentOrder = (rank[equipmentKind(left)] ?? 4) - (rank[equipmentKind(right)] ?? 4);
+  if (equipmentOrder) return equipmentOrder;
+  const equipmentName = left.equipmentName.localeCompare(right.equipmentName, undefined, { numeric: true, sensitivity: "base" });
+  if (equipmentName) return equipmentName;
+  const leftFamily = FEATURED_POINT_FAMILIES.indexOf(left.pointFamily);
+  const rightFamily = FEATURED_POINT_FAMILIES.indexOf(right.pointFamily);
+  const familyOrder = (leftFamily < 0 ? 999 : leftFamily) - (rightFamily < 0 ? 999 : rightFamily);
+  return familyOrder || left.pointName.localeCompare(right.pointName, undefined, { numeric: true, sensitivity: "base" });
+}
+
+function pointFamilyLabel(family) {
+  return POINT_FAMILY_LABELS[family] || family || "Unclassified point";
+}
+
+function pointDisplayName(point) {
+  if (!point?.equipmentName || point.equipmentName === "Unassigned equipment") return point?.pointName || "Unknown point";
+  return point.pointFamily ? `${point.equipmentName} · ${point.pointFamily}` : point.equipmentName;
+}
+
+function seriesDisplayName(sourceName) {
+  const point = [...state.selected.values()].find((candidate) => candidate.pointName === sourceName);
+  return point ? pointDisplayName(point) : sourceName;
 }
 
 function chartX(event) {
@@ -704,6 +844,7 @@ function capitalize(value) {
 }
 
 function csvCell(value) {
-  const text = String(value ?? "");
+  const original = String(value ?? "");
+  const text = /^[=+\-@\t\r]/.test(original) ? `'${original}` : original;
   return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }

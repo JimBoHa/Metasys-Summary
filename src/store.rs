@@ -5,7 +5,10 @@ use chrono::{DateTime, Duration, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{
-    config::MetasysConnectionSettings, email_reports::EmailReportSettings, models::AlarmRecord,
+    config::MetasysConnectionSettings,
+    email_reports::EmailReportSettings,
+    inventory::{EquipmentGroup, EquipmentInventory, EquipmentItem, EquipmentPoint},
+    models::AlarmRecord,
     sql_trends::SqlTrendSettings,
 };
 
@@ -84,6 +87,58 @@ impl Store {
                     recipient_count INTEGER NOT NULL,
                     error_message TEXT
                 );
+
+                CREATE TABLE IF NOT EXISTS equipment_inventory_meta (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    schema_version INTEGER NOT NULL,
+                    root_name TEXT NOT NULL,
+                    captured_at TEXT NOT NULL,
+                    source_summary TEXT NOT NULL,
+                    notes_json TEXT NOT NULL,
+                    imported_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS equipment_inventory_groups (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    description TEXT NOT NULL,
+                    sort_order INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS equipment_inventory_equipment (
+                    id INTEGER PRIMARY KEY,
+                    group_id INTEGER NOT NULL REFERENCES equipment_inventory_groups(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    equipment_type TEXT NOT NULL,
+                    variant TEXT NOT NULL,
+                    protocol TEXT NOT NULL,
+                    network_name TEXT NOT NULL,
+                    mac_address INTEGER,
+                    device_instance INTEGER,
+                    object_reference TEXT NOT NULL,
+                    discovery_status TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    sort_order INTEGER NOT NULL,
+                    UNIQUE(group_id, name)
+                );
+
+                CREATE TABLE IF NOT EXISTS equipment_inventory_points (
+                    id INTEGER PRIMARY KEY,
+                    equipment_id INTEGER NOT NULL REFERENCES equipment_inventory_equipment(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    reference TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    unit TEXT,
+                    historian_point_slice_id INTEGER,
+                    source TEXT NOT NULL,
+                    sort_order INTEGER NOT NULL,
+                    UNIQUE(equipment_id, name)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_equipment_inventory_equipment_group
+                    ON equipment_inventory_equipment(group_id, sort_order);
+                CREATE INDEX IF NOT EXISTS idx_equipment_inventory_points_equipment
+                    ON equipment_inventory_points(equipment_id, sort_order);
                 "#,
             )
             .context("initialize SQLite schema")?;
@@ -311,10 +366,11 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
-        value
+        let settings: SqlTrendSettings = value
             .map(|value| serde_json::from_str(&value).context("decode SQL trend settings"))
             .transpose()
-            .map(Option::unwrap_or_default)
+            .map(Option::unwrap_or_default)?;
+        Ok(settings.upgrade_legacy_defaults())
     }
 
     pub fn save_sql_trend_settings(&self, settings: &SqlTrendSettings) -> Result<()> {
@@ -365,6 +421,226 @@ impl Store {
             params![value, Utc::now().to_rfc3339()],
         )?;
         Ok(())
+    }
+
+    pub fn replace_equipment_inventory(&self, inventory: &EquipmentInventory) -> Result<()> {
+        inventory.validate()?;
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction()
+            .context("begin equipment inventory transaction")?;
+        transaction.execute("DELETE FROM equipment_inventory_groups", [])?;
+        transaction.execute("DELETE FROM equipment_inventory_meta", [])?;
+        transaction.execute(
+            r#"
+            INSERT INTO equipment_inventory_meta (
+                id, schema_version, root_name, captured_at, source_summary, notes_json, imported_at
+            ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            params![
+                i64::from(inventory.schema_version),
+                inventory.root_name,
+                inventory.captured_at.to_rfc3339(),
+                inventory.source_summary,
+                serde_json::to_string(&inventory.notes).context("encode inventory notes")?,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+
+        for (group_index, group) in inventory.groups.iter().enumerate() {
+            transaction.execute(
+                r#"
+                INSERT INTO equipment_inventory_groups (name, description, sort_order)
+                VALUES (?1, ?2, ?3)
+                "#,
+                params![group.name, group.description, group_index as i64],
+            )?;
+            let group_id = transaction.last_insert_rowid();
+            for (equipment_index, equipment) in group.equipment.iter().enumerate() {
+                transaction.execute(
+                    r#"
+                    INSERT INTO equipment_inventory_equipment (
+                        group_id, name, equipment_type, variant, protocol, network_name,
+                        mac_address, device_instance, object_reference, discovery_status,
+                        source, sort_order
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                    "#,
+                    params![
+                        group_id,
+                        equipment.name,
+                        equipment.equipment_type,
+                        equipment.variant,
+                        equipment.protocol,
+                        equipment.network_name,
+                        equipment.mac_address.map(i64::from),
+                        equipment.device_instance.map(i64::from),
+                        equipment.object_reference,
+                        equipment.discovery_status,
+                        equipment.source,
+                        equipment_index as i64,
+                    ],
+                )?;
+                let equipment_id = transaction.last_insert_rowid();
+                for (point_index, point) in equipment.points.iter().enumerate() {
+                    transaction.execute(
+                        r#"
+                        INSERT INTO equipment_inventory_points (
+                            equipment_id, name, reference, category, unit,
+                            historian_point_slice_id, source, sort_order
+                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                        "#,
+                        params![
+                            equipment_id,
+                            point.name,
+                            point.reference,
+                            point.category,
+                            point.unit,
+                            point.historian_point_slice_id,
+                            point.source,
+                            point_index as i64,
+                        ],
+                    )?;
+                }
+            }
+        }
+        transaction
+            .commit()
+            .context("commit equipment inventory transaction")
+    }
+
+    pub fn equipment_inventory(&self) -> Result<Option<EquipmentInventory>> {
+        let connection = self.lock()?;
+        let metadata = connection
+            .query_row(
+                r#"
+                SELECT schema_version, root_name, captured_at, source_summary, notes_json
+                FROM equipment_inventory_meta
+                WHERE id = 1
+                "#,
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((schema_version, root_name, captured_at, source_summary, notes_json)) = metadata
+        else {
+            return Ok(None);
+        };
+
+        let mut group_statement = connection.prepare(
+            r#"
+            SELECT id, name, description
+            FROM equipment_inventory_groups
+            ORDER BY sort_order, id
+            "#,
+        )?;
+        let group_rows = group_statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut groups = Vec::with_capacity(group_rows.len());
+        for (group_id, name, description) in group_rows {
+            let mut equipment_statement = connection.prepare(
+                r#"
+                SELECT id, name, equipment_type, variant, protocol, network_name,
+                       mac_address, device_instance, object_reference, discovery_status, source
+                FROM equipment_inventory_equipment
+                WHERE group_id = ?1
+                ORDER BY sort_order, id
+                "#,
+            )?;
+            let equipment_rows = equipment_statement
+                .query_map([group_id], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, Option<i64>>(6)?,
+                        row.get::<_, Option<i64>>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, String>(9)?,
+                        row.get::<_, String>(10)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut equipment = Vec::with_capacity(equipment_rows.len());
+            for (
+                equipment_id,
+                equipment_name,
+                equipment_type,
+                variant,
+                protocol,
+                network_name,
+                mac_address,
+                device_instance,
+                object_reference,
+                discovery_status,
+                source,
+            ) in equipment_rows
+            {
+                let mut point_statement = connection.prepare(
+                    r#"
+                    SELECT name, reference, category, unit, historian_point_slice_id, source
+                    FROM equipment_inventory_points
+                    WHERE equipment_id = ?1
+                    ORDER BY sort_order, id
+                    "#,
+                )?;
+                let points = point_statement
+                    .query_map([equipment_id], |row| {
+                        Ok(EquipmentPoint {
+                            name: row.get(0)?,
+                            reference: row.get(1)?,
+                            category: row.get(2)?,
+                            unit: row.get(3)?,
+                            historian_point_slice_id: row.get(4)?,
+                            source: row.get(5)?,
+                        })
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                equipment.push(EquipmentItem {
+                    name: equipment_name,
+                    equipment_type,
+                    variant,
+                    protocol,
+                    network_name,
+                    mac_address: mac_address.map(|value| value.clamp(0, 127) as u16),
+                    device_instance: device_instance.map(|value| value.clamp(0, 4_194_303) as u32),
+                    object_reference,
+                    discovery_status,
+                    source,
+                    points,
+                });
+            }
+            groups.push(EquipmentGroup {
+                name,
+                description,
+                equipment,
+            });
+        }
+        Ok(Some(EquipmentInventory {
+            schema_version: schema_version.max(0) as u32,
+            root_name,
+            captured_at: parse_stored_datetime(&captured_at).unwrap_or_else(Utc::now),
+            source_summary,
+            notes: serde_json::from_str(&notes_json).context("decode inventory notes")?,
+            groups,
+        }))
     }
 
     pub fn record_report_delivery(
@@ -644,5 +920,44 @@ mod tests {
             )
             .unwrap();
         assert!(!stored.to_ascii_lowercase().contains("password"));
+    }
+
+    #[test]
+    fn replaces_and_reads_equipment_inventory() {
+        let directory = tempdir().unwrap();
+        let store = Store::open(&directory.path().join("test.sqlite3")).unwrap();
+        let inventory = crate::inventory::EquipmentInventory {
+            schema_version: 1,
+            root_name: "B Mod".to_owned(),
+            captured_at: Utc::now(),
+            source_summary: "Passive MS/TP discovery".to_owned(),
+            notes: vec!["NAE offline".to_owned()],
+            groups: vec![crate::inventory::EquipmentGroup {
+                name: "VAVs".to_owned(),
+                description: "Terminal boxes".to_owned(),
+                equipment: vec![crate::inventory::EquipmentItem {
+                    name: "TB2-101".to_owned(),
+                    equipment_type: "terminalBox".to_owned(),
+                    variant: "fanPoweredHeating".to_owned(),
+                    protocol: "BACnet MS/TP".to_owned(),
+                    network_name: "B2-NAE / FC-1".to_owned(),
+                    mac_address: Some(4),
+                    device_instance: Some(1_049_854),
+                    object_reference: "BMSServer:B2-NAE/FC-1.021004FE".to_owned(),
+                    discovery_status: "Active on trunk".to_owned(),
+                    source: "passive scan".to_owned(),
+                    points: vec![crate::inventory::EquipmentPoint {
+                        name: "ZN-T".to_owned(),
+                        reference: "BMSServer:B2-NAE/FC-1.021004FE.ZN-T".to_owned(),
+                        category: "temperature".to_owned(),
+                        unit: Some("degF".to_owned()),
+                        historian_point_slice_id: Some(7126),
+                        source: "historian".to_owned(),
+                    }],
+                }],
+            }],
+        };
+        store.replace_equipment_inventory(&inventory).unwrap();
+        assert_eq!(store.equipment_inventory().unwrap(), Some(inventory));
     }
 }

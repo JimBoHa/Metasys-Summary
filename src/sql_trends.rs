@@ -19,8 +19,22 @@ const SQL_KEYCHAIN_ACCOUNT: &str = "trend-source";
 const MAX_TREND_ROWS: usize = 5_000;
 const MAX_POINT_ROWS: usize = 10_000;
 const MAX_SELECTED_POINTS: usize = 8;
+pub const MAX_LIVE_POINT_VALUES: usize = 128;
+pub const LIVE_VALUE_REFRESH_SECONDS: u64 = 15;
+pub const LIVE_VALUE_LOOKBACK_HOURS: i64 = 24 * 30;
 const MAX_TREND_HOURS: i64 = 24 * 365 * 10;
 const LEGACY_HELPER_TIMEOUT_SECONDS: u64 = 40;
+const LEGACY_ZONE_ONLY_FILTER: &str = "p.PointName LIKE '%.ZN-T.#85'";
+const DEFAULT_HVAC_FILTER: &str = r#"(
+        p.PointName LIKE '%.ZN-T.#85'
+        OR p.PointName LIKE '%.SA-T.#85'
+        OR p.PointName LIKE '%.SA-F.#85'
+        OR p.PointName LIKE '%.SF-C.#85'
+        OR p.PointName LIKE '%.SF-S.#85'
+        OR p.PointName LIKE '%.DA-T.#85'
+        OR p.PointName LIKE '%.HWV-O.#85'
+        OR p.PointName LIKE '%.HTG-O.#85'
+    )"#;
 const DEFAULT_QUERY: &str = r#"SELECT
     CAST(recent.point_name AS nvarchar(512)) AS point_name,
     recent.sample_time,
@@ -44,7 +58,16 @@ FROM (
         FROM dbo.tblActualValueDigital
         WHERE PointSliceID = ps.PointSliceID AND UTCDateTime >= @P1 AND UTCDateTime <= @P2
     ) AS valueset
-    WHERE ps.IsRawData = 1 AND p.PointName LIKE '%.ZN-T.#85'
+    WHERE ps.IsRawData = 1 AND (
+        p.PointName LIKE '%.ZN-T.#85'
+        OR p.PointName LIKE '%.SA-T.#85'
+        OR p.PointName LIKE '%.SA-F.#85'
+        OR p.PointName LIKE '%.SF-C.#85'
+        OR p.PointName LIKE '%.SF-S.#85'
+        OR p.PointName LIKE '%.DA-T.#85'
+        OR p.PointName LIKE '%.HWV-O.#85'
+        OR p.PointName LIKE '%.HTG-O.#85'
+    )
     ORDER BY valueset.UTCDateTime DESC
 ) AS recent
 ORDER BY recent.sample_time ASC"#;
@@ -75,6 +98,17 @@ impl Default for SqlTrendSettings {
             legacy_tls: false,
             query: DEFAULT_QUERY.to_owned(),
         }
+    }
+}
+
+impl SqlTrendSettings {
+    pub fn upgrade_legacy_defaults(mut self) -> Self {
+        let legacy_default =
+            DEFAULT_QUERY.replacen(DEFAULT_HVAC_FILTER, LEGACY_ZONE_ONLY_FILTER, 1);
+        if self.query == legacy_default {
+            self.query = DEFAULT_QUERY.to_owned();
+        }
+        self
     }
 }
 
@@ -185,6 +219,12 @@ pub struct TrendPoint {
     pub point_slice_id: i32,
     pub point_name: String,
     pub unit: Option<String>,
+    #[serde(default)]
+    pub equipment_name: String,
+    #[serde(default)]
+    pub equipment_path: String,
+    #[serde(default)]
+    pub point_family: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -192,6 +232,86 @@ pub struct TrendPoint {
 pub struct TrendPointCatalog {
     pub points: Vec<TrendPoint>,
     pub truncated: bool,
+}
+
+pub const FEATURED_TREND_POINT_FAMILIES: &[&str] = &[
+    "ZN-T", "SA-T", "SA-F", "SF-C", "SF-S", "DA-T", "HWV-O", "HTG-O", "CLG-O", "ZN-SP", "RA-T",
+    "OA-T", "MA-T", "DMP-O",
+];
+
+fn build_point_catalog(mut points: Vec<TrendPoint>, truncated: bool) -> TrendPointCatalog {
+    for point in &mut points {
+        let (equipment_name, equipment_path, point_family) =
+            trend_point_metadata(&point.point_name);
+        point.equipment_name = equipment_name;
+        point.equipment_path = equipment_path;
+        point.point_family = point_family;
+    }
+    points.sort_by(|left, right| {
+        left.equipment_path
+            .cmp(&right.equipment_path)
+            .then_with(|| left.point_family.cmp(&right.point_family))
+            .then_with(|| left.point_name.cmp(&right.point_name))
+    });
+    TrendPointCatalog { points, truncated }
+}
+
+fn trend_point_metadata(point_name: &str) -> (String, String, String) {
+    let mut reference = point_name.trim();
+    if let Some((prefix, marker)) = reference.rsplit_once('.')
+        && is_attribute_marker(marker)
+    {
+        reference = prefix.trim_end_matches('.');
+    }
+
+    let (equipment_path, family) = reference.rsplit_once('.').map_or_else(
+        || {
+            let uppercase = reference.to_ascii_uppercase();
+            FEATURED_TREND_POINT_FAMILIES
+                .iter()
+                .find_map(|family| {
+                    let marker = format!(".{family}");
+                    uppercase
+                        .rfind(&marker)
+                        .map(|index| (&reference[..index], *family))
+                })
+                .unwrap_or((reference, ""))
+        },
+        |(equipment, family)| (equipment, family),
+    );
+    let equipment_path = equipment_path
+        .trim()
+        .trim_end_matches(['.', '/', ':'])
+        .to_owned();
+    let equipment_name = equipment_path
+        .rsplit(['/', '.'])
+        .find(|part| !part.trim().is_empty())
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .unwrap_or("Unassigned equipment")
+        .to_owned();
+    let point_family = normalize_point_family(family);
+    (equipment_name, equipment_path, point_family)
+}
+
+fn is_attribute_marker(value: &str) -> bool {
+    value.strip_prefix('#').is_some_and(|digits| {
+        !digits.is_empty() && digits.chars().all(|character| character.is_ascii_digit())
+    })
+}
+
+fn normalize_point_family(value: &str) -> String {
+    let normalized = value.trim().replace(['_', ' '], "-").to_ascii_uppercase();
+    if normalized.is_empty()
+        || normalized.len() > 32
+        || !normalized
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-')
+    {
+        String::new()
+    } else {
+        normalized
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -233,6 +353,24 @@ pub struct TrendResponse {
     pub bucket_seconds: Option<i64>,
     pub aggregation: Option<&'static str>,
     pub series: Vec<TrendSeries>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LivePointValue {
+    pub point_slice_id: i32,
+    pub timestamp: DateTime<Utc>,
+    pub value: f64,
+    pub unit: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LivePointValuesResponse {
+    pub generated_at: DateTime<Utc>,
+    pub refresh_interval_seconds: u64,
+    pub lookback_hours: i64,
+    pub values: Vec<LivePointValue>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -349,7 +487,7 @@ pub async fn fetch_trend_points(settings: &SqlTrendSettings) -> Result<TrendPoin
         .await?
         {
             LegacyResponse::Points { points, truncated } => {
-                Ok(TrendPointCatalog { points, truncated })
+                Ok(build_point_catalog(points, truncated))
             }
             _ => bail!("legacy SQL helper returned an unexpected point-catalog response"),
         };
@@ -384,9 +522,12 @@ pub async fn fetch_trend_points(settings: &SqlTrendSettings) -> Result<TrendPoin
                 .try_get::<&str, _>("unit")?
                 .map(str::to_owned)
                 .filter(|value| !value.trim().is_empty()),
+            equipment_name: String::new(),
+            equipment_path: String::new(),
+            point_family: String::new(),
         });
     }
-    Ok(TrendPointCatalog { points, truncated })
+    Ok(build_point_catalog(points, truncated))
 }
 
 pub async fn fetch_trends(
@@ -428,22 +569,7 @@ pub async fn fetch_trends_window(
         .unwrap_or(&settings.query);
     validate_read_only_query(query)?;
 
-    let (rows, truncated) = if settings.legacy_tls {
-        match run_legacy_helper(LegacyRequest::Query {
-            connection: legacy_connection(settings),
-            password: read_sql_password()?,
-            query,
-            from,
-            to,
-        })
-        .await?
-        {
-            LegacyResponse::Samples { rows, truncated } => (rows, truncated),
-            _ => bail!("legacy SQL helper returned an unexpected trend-query response"),
-        }
-    } else {
-        fetch_rows_modern(settings, query, from, to).await?
-    };
+    let (rows, truncated) = fetch_sample_rows(settings, query, from, to).await?;
 
     let bucket_seconds = selected_query.as_ref().map(|(_, seconds)| *seconds);
     Ok(group_rows(
@@ -454,6 +580,80 @@ pub async fn fetch_trends_window(
         bucket_seconds,
         bucket_seconds.map(|_| "mean"),
     ))
+}
+
+pub async fn fetch_live_point_values(
+    settings: &SqlTrendSettings,
+    point_slice_ids: &[i32],
+) -> Result<LivePointValuesResponse> {
+    settings.validate()?;
+    if !settings.enabled {
+        bail!("SQL trend source is disabled");
+    }
+    let point_slice_ids = validate_live_point_slice_ids(point_slice_ids)?;
+    if point_slice_ids.is_empty() {
+        bail!("select at least one historian point");
+    }
+    let query = latest_point_values_query(&point_slice_ids)?;
+    validate_read_only_query(&query)?;
+    let to = Utc::now();
+    let from = to - Duration::hours(LIVE_VALUE_LOOKBACK_HOURS);
+    let (rows, truncated) = fetch_sample_rows(settings, &query, from, to).await?;
+    if truncated {
+        bail!("latest-value query exceeded its bounded result size");
+    }
+
+    let requested = point_slice_ids.into_iter().collect::<BTreeSet<_>>();
+    let mut values = Vec::with_capacity(rows.len());
+    for row in rows {
+        let point_slice_id = row
+            .point_name
+            .parse::<i32>()
+            .context("latest-value query returned an invalid point identifier")?;
+        if !requested.contains(&point_slice_id) {
+            bail!("latest-value query returned an unrequested point identifier");
+        }
+        if !row.sample_value.is_finite() {
+            bail!("latest-value query returned a non-finite value");
+        }
+        values.push(LivePointValue {
+            point_slice_id,
+            timestamp: row.sample_time,
+            value: row.sample_value,
+            unit: row.unit,
+        });
+    }
+    values.sort_by_key(|value| value.point_slice_id);
+
+    Ok(LivePointValuesResponse {
+        generated_at: Utc::now(),
+        refresh_interval_seconds: LIVE_VALUE_REFRESH_SECONDS,
+        lookback_hours: LIVE_VALUE_LOOKBACK_HOURS,
+        values,
+    })
+}
+
+async fn fetch_sample_rows(
+    settings: &SqlTrendSettings,
+    query: &str,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<(Vec<SampleRow>, bool)> {
+    if settings.legacy_tls {
+        return match run_legacy_helper(LegacyRequest::Query {
+            connection: legacy_connection(settings),
+            password: read_sql_password()?,
+            query,
+            from,
+            to,
+        })
+        .await?
+        {
+            LegacyResponse::Samples { rows, truncated } => Ok((rows, truncated)),
+            _ => bail!("legacy SQL helper returned an unexpected trend-query response"),
+        };
+    }
+    fetch_rows_modern(settings, query, from, to).await
 }
 
 async fn fetch_rows_modern(
@@ -705,6 +905,11 @@ fn legacy_connection(settings: &SqlTrendSettings) -> LegacyConnection<'_> {
 }
 
 fn read_sql_password() -> Result<String> {
+    if let Ok(password) = std::env::var("METASYS_SQL_PASSWORD")
+        && !password.is_empty()
+    {
+        return Ok(password);
+    }
     sql_keychain_entry()?
         .get_password()
         .context("SQL Server password is missing; save it from SQL Trend Settings")
@@ -789,6 +994,45 @@ ORDER BY bucketed_values.sample_time ASC"#
     ))
 }
 
+fn latest_point_values_query(point_slice_ids: &[i32]) -> Result<String> {
+    let point_slice_ids = validate_live_point_slice_ids(point_slice_ids)?;
+    let ids = point_slice_ids
+        .into_iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    if ids.is_empty() {
+        bail!("select at least one historian point");
+    }
+    Ok(format!(
+        r#"SELECT
+    CAST(ps.PointSliceID AS nvarchar(32)) AS point_name,
+    latest.sample_time,
+    CAST(latest.sample_value AS float) AS sample_value,
+    CAST(COALESCE(NULLIF(u.DisplayNameShort, ''), u.UnitOfMeasureName) AS nvarchar(64)) AS unit
+FROM dbo.tblPointSlice AS ps
+JOIN dbo.tblPoint AS p ON p.PointID = ps.PointID
+LEFT JOIN dbo.tblUnitOfMeasure AS u ON u.UnitOfMeasureID = p.UnitOfMeasureID
+CROSS APPLY (
+    SELECT TOP (1)
+        source_values.sample_time,
+        source_values.sample_value
+    FROM (
+        SELECT UTCDateTime AS sample_time, CAST(ActualValue AS float) AS sample_value
+        FROM dbo.tblActualValueFloat
+        WHERE PointSliceID = ps.PointSliceID AND UTCDateTime >= @P1 AND UTCDateTime <= @P2
+        UNION ALL
+        SELECT UTCDateTime AS sample_time, CAST(ActualValue AS float) AS sample_value
+        FROM dbo.tblActualValueDigital
+        WHERE PointSliceID = ps.PointSliceID AND UTCDateTime >= @P1 AND UTCDateTime <= @P2
+    ) AS source_values
+    ORDER BY source_values.sample_time DESC
+) AS latest
+WHERE ps.PointSliceID IN ({ids})
+ORDER BY ps.PointSliceID"#
+    ))
+}
+
 fn validate_trend_window(from: DateTime<Utc>, to: DateTime<Utc>) -> Result<i64> {
     let range_seconds = (to - from).num_seconds();
     if range_seconds < 1 {
@@ -801,13 +1045,24 @@ fn validate_trend_window(from: DateTime<Utc>, to: DateTime<Utc>) -> Result<i64> 
 }
 
 fn validate_point_slice_ids(point_slice_ids: &[i32]) -> Result<Vec<i32>> {
+    validate_point_slice_ids_with_limit(point_slice_ids, MAX_SELECTED_POINTS)
+}
+
+fn validate_live_point_slice_ids(point_slice_ids: &[i32]) -> Result<Vec<i32>> {
+    validate_point_slice_ids_with_limit(point_slice_ids, MAX_LIVE_POINT_VALUES)
+}
+
+fn validate_point_slice_ids_with_limit(
+    point_slice_ids: &[i32],
+    maximum: usize,
+) -> Result<Vec<i32>> {
     let unique = point_slice_ids
         .iter()
         .copied()
         .filter(|value| *value > 0)
         .collect::<BTreeSet<_>>();
-    if unique.len() > MAX_SELECTED_POINTS {
-        bail!("select no more than {MAX_SELECTED_POINTS} historian points");
+    if unique.len() > maximum {
+        bail!("select no more than {maximum} historian points");
     }
     if unique.len() != point_slice_ids.len() {
         bail!("historian point selections must be unique positive identifiers");
@@ -910,8 +1165,10 @@ fn validate_read_only_query(query: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        SampleRow, SqlTrendSettings, group_rows, selected_point_query, validate_point_slice_ids,
-        validate_read_only_query, validate_trend_window,
+        DEFAULT_HVAC_FILTER, LEGACY_ZONE_ONLY_FILTER, SampleRow, SqlTrendSettings, group_rows,
+        latest_point_values_query, selected_point_query, trend_point_metadata,
+        validate_live_point_slice_ids, validate_point_slice_ids, validate_read_only_query,
+        validate_trend_window,
     };
     use chrono::{Duration, TimeZone, Utc};
 
@@ -960,6 +1217,57 @@ mod tests {
         assert!(validate_point_slice_ids(&[1, 1]).is_err());
         assert!(validate_point_slice_ids(&[0]).is_err());
         assert!(validate_point_slice_ids(&[1, 2, 3, 4, 5, 6, 7, 8, 9]).is_err());
+    }
+
+    #[test]
+    fn latest_value_query_is_read_only_bounded_and_uses_identifiers() {
+        let query = latest_point_values_query(&[42, 7]).unwrap();
+        validate_read_only_query(&query).unwrap();
+        assert!(query.contains("ps.PointSliceID IN (7,42)"));
+        assert!(query.contains("SELECT TOP (1)"));
+        assert!(query.contains("ORDER BY source_values.sample_time DESC"));
+        assert!(query.contains("UTCDateTime >= @P1 AND UTCDateTime <= @P2"));
+        assert!(validate_live_point_slice_ids(&[1, 1]).is_err());
+        assert!(validate_live_point_slice_ids(&[0]).is_err());
+        assert!(validate_live_point_slice_ids(&(1..=129).collect::<Vec<_>>()).is_err());
+    }
+
+    #[test]
+    fn classifies_terminal_box_and_air_handler_point_names() {
+        assert_eq!(
+            trend_point_metadata("G2-NAE:G2-NAE/FC-1.TB6-P06.ZN-T.#85"),
+            (
+                "TB6-P06".to_owned(),
+                "G2-NAE:G2-NAE/FC-1.TB6-P06".to_owned(),
+                "ZN-T".to_owned(),
+            )
+        );
+        assert_eq!(
+            trend_point_metadata("BMSServer:CentralPlant/FC-1.AHU-1.SA-F.#85"),
+            (
+                "AHU-1".to_owned(),
+                "BMSServer:CentralPlant/FC-1.AHU-1".to_owned(),
+                "SA-F".to_owned(),
+            )
+        );
+        assert_eq!(
+            trend_point_metadata("SERVER:DEVICE/FAV-201.HWV_O"),
+            (
+                "FAV-201".to_owned(),
+                "SERVER:DEVICE/FAV-201".to_owned(),
+                "HWV-O".to_owned(),
+            )
+        );
+
+        for family in [
+            "ZN-T", "SA-T", "SA-F", "SF-C", "SF-S", "DA-T", "HWV-O", "HTG-O",
+        ] {
+            let reference = format!("BMSServer:A2-NAE/FC-1.TB1-301.{family}.#85");
+            let (equipment, path, discovered_family) = trend_point_metadata(&reference);
+            assert_eq!(equipment, "TB1-301");
+            assert_eq!(path, "BMSServer:A2-NAE/FC-1.TB1-301");
+            assert_eq!(discovered_family, family);
+        }
     }
 
     #[test]
@@ -1022,5 +1330,31 @@ mod tests {
         });
         let settings: SqlTrendSettings = serde_json::from_value(value).unwrap();
         assert!(!settings.legacy_tls);
+    }
+
+    #[test]
+    fn upgrades_the_zone_only_built_in_query_to_featured_hvac_families() {
+        let settings = SqlTrendSettings {
+            query: super::DEFAULT_QUERY.replacen(DEFAULT_HVAC_FILTER, LEGACY_ZONE_ONLY_FILTER, 1),
+            ..Default::default()
+        }
+        .upgrade_legacy_defaults();
+        assert!(settings.query.contains(DEFAULT_HVAC_FILTER));
+        for family in [
+            "ZN-T", "SA-T", "SA-F", "SF-C", "SF-S", "DA-T", "HWV-O", "HTG-O",
+        ] {
+            assert!(settings.query.contains(family));
+        }
+        validate_read_only_query(&settings.query).unwrap();
+
+        let custom_query = format!(
+            "SELECT * FROM samples WHERE sample_time >= @P1 AND sample_time <= @P2 AND {LEGACY_ZONE_ONLY_FILTER}"
+        );
+        let custom_settings = SqlTrendSettings {
+            query: custom_query.clone(),
+            ..Default::default()
+        }
+        .upgrade_legacy_defaults();
+        assert_eq!(custom_settings.query, custom_query);
     }
 }

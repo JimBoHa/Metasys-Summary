@@ -30,6 +30,7 @@
         <button class="sidebar-group-toggle" type="button" aria-expanded="true"><span>Operations</span><span class="sidebar-chevron" aria-hidden="true">›</span></button>
         <div class="sidebar-group-items">
           <a class="sidebar-link" data-nav-key="operations" href="/operations"><span class="sidebar-link-icon">!</span><span>Alarm summary</span></a>
+          <a class="sidebar-link" data-nav-key="equipment" href="/equipment"><span class="sidebar-link-icon">H</span><span>Equipment hierarchy</span></a>
           <a class="sidebar-link" data-nav-key="diagnostics" href="/diagnostics"><span class="sidebar-link-icon">D</span><span>System diagnostics</span></a>
           <a class="sidebar-link" data-nav-key="trends" href="/trends"><span class="sidebar-link-icon">∿</span><span>Trend analysis</span></a>
         </div>
@@ -78,13 +79,20 @@
         </header>
         <div class="point-search-row">
           <label for="point-search">Search historian points</label>
-          <div><input id="point-search" type="search" autocomplete="off" placeholder="Equipment, sensor, or point name"><button id="reload-points-button" type="button">Reload</button></div>
+          <div><input id="point-search" type="search" autocomplete="off" placeholder="TB6-P06, ZN-T, SA-F…"><button id="reload-points-button" type="button">Reload</button></div>
+        </div>
+        <div class="catalog-filter-panel">
+          <p id="catalog-summary">Classifying equipment and point families…</p>
+          <div class="catalog-filter-grid">
+            <label for="point-family-filter">Point family<select id="point-family-filter"><option value="all">All families</option></select></label>
+            <label for="equipment-kind-filter">Equipment<select id="equipment-kind-filter"><option value="all">All equipment</option></select></label>
+          </div>
         </div>
         <div id="selected-points" class="selected-points" aria-label="Selected historian points"><p>Select one or more points below.</p></div>
         <div id="point-results" class="point-results" role="listbox" aria-multiselectable="true" aria-label="Historian point catalog">
           <p class="empty-state">Loading historian catalog…</p>
         </div>
-        <footer><span id="result-count">0 shown</span><span>Maximum 8 selected</span></footer>
+        <footer><span id="result-count">0 shown</span><button id="show-more-points-button" type="button" hidden>Show more</button><span>Maximum 8 selected</span></footer>
       </aside>
 
       <div class="analysis-column">
@@ -99,6 +107,8 @@
                 <button type="button" data-hours="720">30d</button>
                 <button type="button" data-hours="2160">90d</button>
                 <button type="button" data-hours="8760">1y</button>
+                <button type="button" data-hours="26280">3y</button>
+                <button type="button" data-hours="43800">5y</button>
                 <button type="button" data-hours="custom">Custom</button>
               </div>
             </fieldset>

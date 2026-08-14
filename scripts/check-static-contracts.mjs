@@ -10,7 +10,8 @@ const pageContracts = [
   { html: "portal.html", scripts: ["portal.js"] },
   { html: "index.html", scripts: ["app.js"] },
   { html: "trends.html", scripts: ["trends.js"] },
-  { html: "diagnostics.html", scripts: ["diagnostics.js"] }
+  { html: "diagnostics.html", scripts: ["diagnostics.js"] },
+  { html: "equipment.html", scripts: ["equipment.js"] }
 ];
 const errors = [];
 
@@ -55,6 +56,15 @@ for (const file of fs.readdirSync(staticDirectory).filter((name) => name.endsWit
   if (/\b(?:innerHTML|outerHTML|insertAdjacentHTML|document\.write)\b|\beval\s*\(|new\s+Function\b/.test(source)) {
     errors.push(`${file}: unsafe DOM/code execution sink found`);
   }
+}
+
+const trendSource = readStatic("trends.js");
+for (const family of ["ZN-T", "SA-T", "SA-F", "SF-C", "SF-S", "DA-T", "HWV-O", "HTG-O"]) {
+  if (!trendSource.includes(`"${family}"`)) errors.push(`trends.js: missing featured historian family '${family}'`);
+}
+const trendPage = readStatic("trends.html");
+for (const hours of ["26280", "43800"]) {
+  if (!trendPage.includes(`data-hours="${hours}"`)) errors.push(`trends.html: missing multi-year range '${hours}'`);
 }
 
 const navigationKeys = pageContracts.map(({ html }) => {

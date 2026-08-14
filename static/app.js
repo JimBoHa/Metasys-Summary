@@ -577,7 +577,9 @@ async function loadTrendPoints() {
     selectedTrendPointIds.clear();
     renderTrendPointOptions();
     const suffix = sqlTrendPointsTruncated ? " (catalog limit reached)" : "";
-    setTrendMessage(`${numberFormat.format(sqlTrendPoints.length)} historian points available${suffix}. Search and select up to eight.`);
+    const zoneTemperatures = sqlTrendPoints.filter((point) => point.pointFamily === "ZN-T").length;
+    const terminalBoxPoints = sqlTrendPoints.filter((point) => /^TB/i.test(point.equipmentName || "")).length;
+    setTrendMessage(`${numberFormat.format(sqlTrendPoints.length)} historian points available${suffix}, including ${numberFormat.format(zoneTemperatures)} ZN-T and ${numberFormat.format(terminalBoxPoints)} terminal-box points. Search and select up to eight.`);
   } catch (error) {
     sqlTrendPoints = [];
     selectedTrendPointIds.clear();
@@ -592,18 +594,32 @@ function renderTrendPointOptions() {
   const select = $("trend-point-select");
   const search = $("trend-point-search").value.trim().toLocaleLowerCase();
   const matches = sqlTrendPoints
-    .filter((point) => !search || `${point.pointName} ${point.unit || ""}`.toLocaleLowerCase().includes(search))
+    .filter((point) => !search || `${point.pointName} ${point.equipmentName || ""} ${point.equipmentPath || ""} ${point.pointFamily || ""} ${point.unit || ""}`.toLocaleLowerCase().includes(search))
+    .sort(compareTrendCatalogPoints)
     .slice(0, 500);
   select.replaceChildren();
   matches.forEach((point) => {
     const option = document.createElement("option");
     option.value = String(point.pointSliceId);
-    option.textContent = `${point.pointName}${point.unit ? ` · ${point.unit}` : ""}`;
+    option.textContent = `${trendPointLabel(point)}${point.unit ? ` · ${point.unit}` : ""} — ${point.pointName}`;
     option.selected = selectedTrendPointIds.has(point.pointSliceId);
     select.append(option);
   });
   select.disabled = !sqlTrendPoints.length;
   updateTrendPointSelectionText(matches.length);
+}
+
+function trendPointLabel(point) {
+  return point.equipmentName && point.pointFamily
+    ? `${point.equipmentName} · ${point.pointFamily}`
+    : point.pointName;
+}
+
+function compareTrendCatalogPoints(left, right) {
+  const rank = (point) => /^TB/i.test(point.equipmentName || "") ? 0 : /WSHP|^HP/i.test(point.equipmentName || "") ? 1 : /^[0-9A-F]{6,}$/i.test(point.equipmentName || "") ? 3 : 2;
+  return rank(left) - rank(right)
+    || String(left.equipmentName || "").localeCompare(String(right.equipmentName || ""), undefined, { numeric: true, sensitivity: "base" })
+    || String(left.pointFamily || "").localeCompare(String(right.pointFamily || ""));
 }
 
 function updateTrendPointSelection() {
