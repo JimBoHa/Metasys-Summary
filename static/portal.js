@@ -36,10 +36,19 @@ function bindEvents() {
   $("setup-metasys-form").addEventListener("submit", (event) => saveMetasysConnection(event, "setup"));
   $("setup-form").addEventListener("submit", bootstrapAdministrator);
   $("login-form").addEventListener("submit", signIn);
-  $("logout-button").addEventListener("click", signOut);
-  document.querySelectorAll(".nav-button").forEach((button) => {
-    button.addEventListener("click", () => showView(button.dataset.view));
+  document.querySelectorAll(".sidebar-link[data-portal-view]").forEach((link) => {
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      if (link.dataset.portalView === "admin") {
+        showView("admin", false);
+        showAdminPane(link.dataset.adminView || "structure");
+      } else {
+        showView(link.dataset.portalView);
+      }
+      window.MetasysNavigation?.close();
+    });
   });
+  window.addEventListener("hashchange", navigateFromHash);
   $("refresh-map-button").addEventListener("click", () => loadMap(true));
   $("refresh-requests-button").addEventListener("click", loadRequests);
   document.querySelectorAll(".admin-tab").forEach((button) => {
@@ -232,13 +241,9 @@ async function enterPortal(session) {
   app.session = session;
   $("login-view").hidden = true;
   $("app-shell").hidden = false;
-  setText("current-user-name", session.user.displayName);
-  setText("current-user-role", roleLabel(session.user.role));
   const isAdmin = session.user.role === "admin";
-  const isOperator = session.user.role === "operator";
-  $("admin-nav").hidden = !isAdmin;
-  $("operations-link").hidden = !(isAdmin || isOperator);
-  $("trends-link").hidden = !(isAdmin || isOperator);
+  window.MetasysNavigation?.configure(session);
+  $("sidebar-metasys-link").hidden = !isAdmin || !app.localConfigurationAllowed;
   $("admin-metasys-tab").hidden = !isAdmin || !app.localConfigurationAllowed;
   await Promise.all([
     loadMap(),
@@ -246,33 +251,43 @@ async function enterPortal(session) {
     isAdmin ? loadUsers() : Promise.resolve(),
     isAdmin && app.localConfigurationAllowed ? loadMetasysSettings("admin") : Promise.resolve()
   ]);
-  showView("home");
+  navigateFromHash();
 }
 
-async function signOut() {
-  try {
-    await request("/api/portal/logout", { method: "POST" });
-  } catch (_) {
-    // The local UI still clears itself if the session already expired.
+function navigateFromHash() {
+  if (!app.session) return;
+  const [requestedView, requestedPane] = window.location.hash.slice(1).split("/");
+  const view = ["home", "requests", "admin"].includes(requestedView) ? requestedView : "home";
+  if (view === "admin" && app.session.user.role !== "admin") {
+    showView("home");
+    return;
   }
-  window.location.assign("/");
+  showView(view, false);
+  if (view === "admin") {
+    let pane = ["structure", "maps", "users", "metasys"].includes(requestedPane) ? requestedPane : "structure";
+    if (pane === "metasys" && !app.localConfigurationAllowed) pane = "structure";
+    showAdminPane(pane, false);
+  } else if (!window.location.hash) {
+    window.history.replaceState(null, "", "#home");
+  }
 }
 
-function showView(name) {
+function showView(name, updateLocation = true) {
   if (name === "admin" && app.session?.user.role !== "admin") return;
   app.activeView = name;
   $("home-section").hidden = name !== "home";
   $("requests-section").hidden = name !== "requests";
   $("admin-section").hidden = name !== "admin";
-  document.querySelectorAll(".nav-button").forEach((button) => {
-    button.classList.toggle("active", button.dataset.view === name);
-  });
   if (name === "requests") renderRequests();
   if (name === "admin") renderAdmin();
-  window.location.hash = name;
+  if (name !== "admin") {
+    window.MetasysNavigation?.setActive(name);
+    setText("portal-context", name === "requests" ? "Service requests" : "Building overview");
+  }
+  if (updateLocation) window.history.pushState(null, "", `#${name}`);
 }
 
-function showAdminPane(name) {
+function showAdminPane(name, updateLocation = true) {
   if (name === "metasys" && !app.localConfigurationAllowed) return;
   $("admin-structure").hidden = name !== "structure";
   $("admin-maps").hidden = name !== "maps";
@@ -281,6 +296,10 @@ function showAdminPane(name) {
   document.querySelectorAll(".admin-tab").forEach((button) => {
     button.classList.toggle("active", button.dataset.adminView === name);
   });
+  const labels = { structure: "Buildings & floors", maps: "Floor-plan editor", users: "Users & access", metasys: "Metasys connection" };
+  setText("portal-context", labels[name] || "Administration");
+  window.MetasysNavigation?.setActive(`admin-${name}`);
+  if (updateLocation) window.history.pushState(null, "", `#admin/${name}`);
   if (name === "maps") renderMapAdministration();
   if (name === "users") renderUsers();
   if (name === "metasys") loadMetasysSettings("admin");

@@ -10,6 +10,7 @@ const selectedTrendPointIds = new Set();
 let refreshTimer = null;
 let reportRecipients = [];
 let csrfToken = "";
+let currentUserRole = "";
 
 const $ = (id) => document.getElementById(id);
 
@@ -22,6 +23,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
     const session = await response.json();
     csrfToken = session.csrfToken;
+    currentUserRole = session.user.role;
+    window.MetasysNavigation?.configure(session);
     const canManageSettings = session.user.role === "admin";
     $("report-settings-button").hidden = !canManageSettings;
     $("sql-settings-button").hidden = !canManageSettings;
@@ -31,7 +34,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
   $("refresh-button").addEventListener("click", manualRefresh);
   $("report-settings-button").addEventListener("click", openReportSettings);
-  $("report-settings-close").addEventListener("click", () => $("report-settings-dialog").close());
+  $("report-settings-close").addEventListener("click", () => closeSettingsDialog("report-settings-dialog"));
   $("report-settings-form").addEventListener("submit", saveReportSettings);
   $("add-report-recipient").addEventListener("click", addReportRecipient);
   $("new-report-recipient").addEventListener("keydown", (event) => {
@@ -43,7 +46,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("smtp-test-button").addEventListener("click", testSmtpConnection);
   $("send-report-button").addEventListener("click", sendReportNow);
   $("sql-settings-button").addEventListener("click", openSqlSettings);
-  $("sql-settings-close").addEventListener("click", () => $("sql-settings-dialog").close());
+  $("sql-settings-close").addEventListener("click", () => closeSettingsDialog("sql-settings-dialog"));
   $("sql-settings-form").addEventListener("submit", saveSqlSettings);
   $("sql-test-button").addEventListener("click", testSqlConnection);
   $("load-trend-points-button").addEventListener("click", loadTrendPoints);
@@ -53,6 +56,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("trend-range").addEventListener("change", () => {
     if (sqlTrendData) loadSqlTrends();
   });
+  window.addEventListener("hashchange", handleOperationsHash);
+  handleOperationsHash();
   loadDashboard();
   refreshTimer = window.setInterval(loadDashboard, 60_000);
   window.addEventListener("visibilitychange", () => {
@@ -66,6 +71,27 @@ document.addEventListener("DOMContentLoaded", async () => {
     }).observe(document.querySelector(".dashboard-grid"));
   }
 });
+
+function handleOperationsHash() {
+  const hash = window.location.hash.slice(1);
+  if (currentUserRole === "admin" && hash === "reports") {
+    window.MetasysNavigation?.setActive("admin-reports");
+    openReportSettings();
+  } else if (currentUserRole === "admin" && hash === "sql") {
+    window.MetasysNavigation?.setActive("admin-sql");
+    openSqlSettings();
+  } else {
+    window.MetasysNavigation?.setActive("operations");
+  }
+}
+
+function closeSettingsDialog(dialogId) {
+  $(dialogId).close();
+  if (["#reports", "#sql"].includes(window.location.hash)) {
+    window.history.replaceState(null, "", "/operations");
+  }
+  window.MetasysNavigation?.setActive("operations");
+}
 
 function portalFetch(resource, options = {}) {
   const headers = new Headers(options.headers || {});

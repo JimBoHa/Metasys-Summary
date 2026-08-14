@@ -7,23 +7,54 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'">
   <title>Metasys Trend Analysis</title>
   <link rel="stylesheet" href="/trends.css">
+  <link rel="stylesheet" href="/navigation.css">
+  <script src="/navigation.js" defer></script>
   <script src="/trends.js" defer></script>
 </head>
-<body>
+<body class="has-sidebar" data-nav-active="trends">
+  <div class="sidebar-backdrop" data-sidebar-close aria-hidden="true"></div>
+  <aside id="primary-sidebar" class="primary-sidebar" tabindex="-1" aria-label="Application navigation">
+    <a class="sidebar-brand" href="/">
+      <span class="sidebar-brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span class="sidebar-brand-copy"><small>INFRA / METASYS</small><strong>Metasys Summary</strong></span>
+    </a>
+    <nav class="sidebar-nav">
+      <section class="sidebar-group" data-sidebar-group="overview">
+        <button class="sidebar-group-toggle" type="button" aria-expanded="true"><span>Overview</span><span class="sidebar-chevron" aria-hidden="true">›</span></button>
+        <div class="sidebar-group-items">
+          <a class="sidebar-link" data-nav-key="home" href="/#home"><span class="sidebar-link-icon">B</span><span>Building overview</span></a>
+          <a class="sidebar-link" data-nav-key="requests" href="/#requests"><span class="sidebar-link-icon">R</span><span>Service requests</span></a>
+        </div>
+      </section>
+      <section class="sidebar-group" data-sidebar-group="operations" data-sidebar-role="operations" hidden>
+        <button class="sidebar-group-toggle" type="button" aria-expanded="true"><span>Operations</span><span class="sidebar-chevron" aria-hidden="true">›</span></button>
+        <div class="sidebar-group-items">
+          <a class="sidebar-link" data-nav-key="operations" href="/operations"><span class="sidebar-link-icon">!</span><span>Alarm summary</span></a>
+          <a class="sidebar-link" data-nav-key="trends" href="/trends"><span class="sidebar-link-icon">∿</span><span>Trend analysis</span></a>
+        </div>
+      </section>
+      <section class="sidebar-group" data-sidebar-group="administration" data-sidebar-role="admin" hidden>
+        <button class="sidebar-group-toggle" type="button" aria-expanded="true"><span>Administration</span><span class="sidebar-chevron" aria-hidden="true">›</span></button>
+        <div class="sidebar-group-items">
+          <a class="sidebar-link" data-nav-key="admin-structure" href="/#admin/structure"><span class="sidebar-link-icon">S</span><span>Buildings &amp; floors</span></a>
+          <a class="sidebar-link" data-nav-key="admin-maps" href="/#admin/maps"><span class="sidebar-link-icon">M</span><span>Floor-plan editor</span></a>
+          <a class="sidebar-link" data-nav-key="admin-users" href="/#admin/users"><span class="sidebar-link-icon">U</span><span>Users &amp; access</span></a>
+          <a class="sidebar-link" data-nav-key="admin-metasys" href="/#admin/metasys"><span class="sidebar-link-icon">C</span><span>Metasys connection</span></a>
+          <a class="sidebar-link" data-nav-key="admin-reports" href="/operations#reports"><span class="sidebar-link-icon">E</span><span>Email reports</span></a>
+          <a class="sidebar-link" data-nav-key="admin-sql" href="/operations#sql"><span class="sidebar-link-icon">Q</span><span>SQL trend source</span></a>
+        </div>
+      </section>
+    </nav>
+    <div class="sidebar-account"><span><strong class="sidebar-user-name">Signed in</strong><small class="sidebar-user-role">Account</small></span><button class="sidebar-sign-out" type="button" aria-label="Sign out">↗</button></div>
+  </aside>
+  <div class="sidebar-page">
   <header class="trend-topbar">
+    <button class="sidebar-mobile-toggle" data-sidebar-toggle type="button" aria-controls="primary-sidebar" aria-label="Open navigation"><i aria-hidden="true">☰</i><span>Menu</span></button>
     <a class="trend-brand" href="/">
       <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
       <span><small>INFRA / METASYS</small><strong>Trend Analysis</strong></span>
     </a>
-    <nav aria-label="Operations navigation">
-      <a href="/">Building portal</a>
-      <a href="/operations">Alarm summary</a>
-      <a class="active" href="/trends" aria-current="page">Trends</a>
-    </nav>
-    <div class="account">
-      <span><strong id="user-name">—</strong><small id="user-role">—</small></span>
-      <button id="sign-out-button" type="button">Sign out</button>
-    </div>
+    <span class="trend-header-note">Read-only SQL historian</span>
   </header>
 
   <main>
@@ -129,5 +160,6 @@
       </div>
     </section>
   </main>
+  </div>
 </body>
 </html>

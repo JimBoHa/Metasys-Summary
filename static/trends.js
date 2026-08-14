@@ -27,8 +27,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
     state.session = session;
-    $("user-name").textContent = session.user.displayName;
-    $("user-role").textContent = roleLabel(session.user.role);
+    window.MetasysNavigation?.configure(session);
+    window.MetasysNavigation?.setActive("trends");
     await loadPointCatalog();
   } catch (error) {
     showMessage(error.message || "Unable to open the trend workspace", true);
@@ -54,7 +54,6 @@ function bindEvents() {
   });
   $("toggle-table-button").addEventListener("click", toggleDataTable);
   $("export-csv-button").addEventListener("click", exportCsv);
-  $("sign-out-button").addEventListener("click", signOut);
   document.querySelectorAll("#range-presets button").forEach((button) => {
     button.addEventListener("click", () => selectRange(button));
   });
@@ -610,14 +609,6 @@ function setDefaultCustomRange() {
   $("range-end").value = localDateTimeValue(end);
 }
 
-async function signOut() {
-  try {
-    await fetchJson("/api/portal/logout", { method: "POST" });
-  } finally {
-    window.location.assign("/");
-  }
-}
-
 async function fetchJson(url, options = {}) {
   const headers = new Headers(options.headers || {});
   if (options.method && !["GET", "HEAD", "OPTIONS"].includes(options.method) && state.session?.csrfToken) headers.set("X-CSRF-Token", state.session.csrfToken);
@@ -706,10 +697,6 @@ function formatInteger(value) {
 
 function roundCompact(value) {
   return Number(value.toFixed(value >= 10 ? 0 : 1));
-}
-
-function roleLabel(role) {
-  return role === "admin" ? "Administrator" : role === "operator" ? "Operator" : role;
 }
 
 function capitalize(value) {

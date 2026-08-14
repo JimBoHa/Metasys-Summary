@@ -7,9 +7,11 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'">
   <title>Building Maintenance Portal</title>
   <link rel="stylesheet" href="/portal.css">
+  <link rel="stylesheet" href="/navigation.css">
+  <script src="/navigation.js" defer></script>
   <script src="/portal.js" defer></script>
 </head>
-<body>
+<body class="has-sidebar">
   <section id="login-view" class="login-shell">
     <div class="login-art" aria-hidden="true">
       <div class="blueprint-grid"></div>
@@ -73,22 +75,49 @@
   </section>
 
   <div id="app-shell" class="app-shell" hidden>
+    <div class="sidebar-backdrop" data-sidebar-close aria-hidden="true"></div>
+    <aside id="primary-sidebar" class="primary-sidebar" tabindex="-1" aria-label="Application navigation">
+      <a class="sidebar-brand" href="/#home">
+        <span class="sidebar-brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span class="sidebar-brand-copy"><small>INFRA / METASYS</small><strong>Metasys Summary</strong></span>
+      </a>
+      <nav class="sidebar-nav">
+        <section class="sidebar-group" data-sidebar-group="overview">
+          <button class="sidebar-group-toggle" type="button" aria-expanded="true"><span>Overview</span><span class="sidebar-chevron" aria-hidden="true">›</span></button>
+          <div class="sidebar-group-items">
+            <a class="sidebar-link" data-nav-key="home" data-portal-view="home" href="/#home"><span class="sidebar-link-icon">B</span><span>Building overview</span></a>
+            <a class="sidebar-link" data-nav-key="requests" data-portal-view="requests" href="/#requests"><span class="sidebar-link-icon">R</span><span>Service requests</span></a>
+          </div>
+        </section>
+        <section class="sidebar-group" data-sidebar-group="operations" data-sidebar-role="operations" hidden>
+          <button class="sidebar-group-toggle" type="button" aria-expanded="true"><span>Operations</span><span class="sidebar-chevron" aria-hidden="true">›</span></button>
+          <div class="sidebar-group-items">
+            <a class="sidebar-link" data-nav-key="operations" href="/operations"><span class="sidebar-link-icon">!</span><span>Alarm summary</span></a>
+            <a class="sidebar-link" data-nav-key="trends" href="/trends"><span class="sidebar-link-icon">∿</span><span>Trend analysis</span></a>
+          </div>
+        </section>
+        <section class="sidebar-group" data-sidebar-group="administration" data-sidebar-role="admin" hidden>
+          <button class="sidebar-group-toggle" type="button" aria-expanded="true"><span>Administration</span><span class="sidebar-chevron" aria-hidden="true">›</span></button>
+          <div class="sidebar-group-items">
+            <a class="sidebar-link" data-nav-key="admin-structure" data-portal-view="admin" data-admin-view="structure" href="/#admin/structure"><span class="sidebar-link-icon">S</span><span>Buildings &amp; floors</span></a>
+            <a class="sidebar-link" data-nav-key="admin-maps" data-portal-view="admin" data-admin-view="maps" href="/#admin/maps"><span class="sidebar-link-icon">M</span><span>Floor-plan editor</span></a>
+            <a class="sidebar-link" data-nav-key="admin-users" data-portal-view="admin" data-admin-view="users" href="/#admin/users"><span class="sidebar-link-icon">U</span><span>Users &amp; access</span></a>
+            <a id="sidebar-metasys-link" class="sidebar-link" data-nav-key="admin-metasys" data-portal-view="admin" data-admin-view="metasys" href="/#admin/metasys"><span class="sidebar-link-icon">C</span><span>Metasys connection</span></a>
+            <a class="sidebar-link" data-nav-key="admin-reports" href="/operations#reports"><span class="sidebar-link-icon">E</span><span>Email reports</span></a>
+            <a class="sidebar-link" data-nav-key="admin-sql" href="/operations#sql"><span class="sidebar-link-icon">Q</span><span>SQL trend source</span></a>
+          </div>
+        </section>
+      </nav>
+      <div class="sidebar-account"><span><strong class="sidebar-user-name">Signed in</strong><small class="sidebar-user-role">Account</small></span><button class="sidebar-sign-out" type="button" aria-label="Sign out">↗</button></div>
+    </aside>
+    <div class="sidebar-page">
     <header class="app-header">
+      <button class="sidebar-mobile-toggle" data-sidebar-toggle type="button" aria-controls="primary-sidebar" aria-label="Open navigation"><i aria-hidden="true">☰</i><span>Menu</span></button>
       <a class="app-brand" href="#home" aria-label="Maintenance portal home">
         <span class="brand-symbol"><i></i><i></i><i></i></span>
         <span><small>METASYS SUMMARY</small><strong>Maintenance Portal</strong></span>
       </a>
-      <nav aria-label="Primary navigation">
-        <button class="nav-button active" data-view="home" type="button">Building</button>
-        <button class="nav-button" data-view="requests" type="button">Service requests</button>
-        <button id="admin-nav" class="nav-button" data-view="admin" type="button" hidden>Administration</button>
-        <a id="operations-link" class="nav-link" href="/operations" hidden>Operations</a>
-        <a id="trends-link" class="nav-link" href="/trends" hidden>Trend analysis</a>
-      </nav>
-      <div class="user-menu">
-        <span><strong id="current-user-name">—</strong><small id="current-user-role">—</small></span>
-        <button id="logout-button" class="icon-button" type="button" aria-label="Sign out">↗</button>
-      </div>
+      <span id="portal-context" class="portal-context">Building overview</span>
     </header>
 
     <main class="app-main">
@@ -137,9 +166,9 @@
           <div><p class="eyebrow">ADMINISTRATION</p><h1>Spaces, maps, and access</h1><p>Build the site hierarchy, simplify drawings, map FAV points, and assign account scopes.</p></div>
         </header>
         <div class="admin-tabs" role="tablist">
-          <button class="admin-tab active" data-admin-view="structure" type="button">Buildings & floors</button>
+          <button class="admin-tab active" data-admin-view="structure" type="button">Buildings &amp; floors</button>
           <button class="admin-tab" data-admin-view="maps" type="button">Floor-plan editor</button>
-          <button class="admin-tab" data-admin-view="users" type="button">Users & access</button>
+          <button class="admin-tab" data-admin-view="users" type="button">Users &amp; access</button>
           <button id="admin-metasys-tab" class="admin-tab" data-admin-view="metasys" type="button">Metasys connection</button>
         </div>
 
@@ -251,6 +280,7 @@
         </section>
       </section>
     </main>
+    </div>
   </div>
 
   <dialog id="report-dialog" class="modal-dialog">

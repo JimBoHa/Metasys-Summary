@@ -62,6 +62,8 @@ Optional login-time background service:
 
 ## Dashboard sections
 
+The authenticated interface uses a persistent, grouped left sidebar for building views, operations tools, and administrator configuration. The sidebar becomes a drawer on smaller screens and hides operations or administration groups when the signed-in role does not have access. See [application navigation](docs/navigation.md).
+
 - Whole-building and floor views based on administrator-uploaded PDF plans
 - PDF plans displayed directly as map backgrounds with manually drawn service regions
 - Named service regions with FAV and Metasys point mappings
