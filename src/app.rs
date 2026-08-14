@@ -9,6 +9,10 @@ use crate::{
     config::Config,
     metasys::MetasysClient,
     models::{AlarmRecord, DashboardView, HealthView, OverrideRecord},
+    sql_trends::{
+        SqlTrendSettingsUpdate, SqlTrendSettingsView, TrendResponse, clear_sql_password,
+        fetch_trends, set_sql_password, test_connection,
+    },
     store::Store,
 };
 
@@ -124,5 +128,35 @@ impl AppState {
 
     pub async fn health(&self) -> HealthView {
         self.live.read().await.health.clone()
+    }
+
+    pub fn sql_trend_settings(&self) -> Result<SqlTrendSettingsView> {
+        Ok(self.store.sql_trend_settings()?.view())
+    }
+
+    pub fn update_sql_trend_settings(
+        &self,
+        update: SqlTrendSettingsUpdate,
+    ) -> Result<SqlTrendSettingsView> {
+        let settings = update.validated_settings()?;
+        if update.clear_password {
+            clear_sql_password()?;
+        } else if let Some(password) = update.password.as_deref()
+            && !password.is_empty()
+        {
+            set_sql_password(password)?;
+        }
+        self.store.save_sql_trend_settings(&settings)?;
+        Ok(settings.view())
+    }
+
+    pub async fn test_sql_trend_connection(&self) -> Result<()> {
+        let settings = self.store.sql_trend_settings()?;
+        test_connection(&settings).await
+    }
+
+    pub async fn sql_trends(&self, hours: i64) -> Result<TrendResponse> {
+        let settings = self.store.sql_trend_settings()?;
+        fetch_trends(&settings, hours).await
     }
 }

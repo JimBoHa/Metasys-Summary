@@ -4,7 +4,7 @@ use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::models::AlarmRecord;
+use crate::{models::AlarmRecord, sql_trends::SqlTrendSettings};
 
 pub struct Store {
     connection: Mutex<Connection>,
@@ -49,6 +49,12 @@ impl Store {
                     active_alarm_count INTEGER NOT NULL,
                     override_count INTEGER NOT NULL,
                     error_message TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 );
                 "#,
             )
@@ -194,6 +200,37 @@ impl Store {
         Ok(())
     }
 
+    pub fn sql_trend_settings(&self) -> Result<SqlTrendSettings> {
+        let connection = self.lock()?;
+        let value: Option<String> = connection
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'sql_trends'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        value
+            .map(|value| serde_json::from_str(&value).context("decode SQL trend settings"))
+            .transpose()
+            .map(Option::unwrap_or_default)
+    }
+
+    pub fn save_sql_trend_settings(&self, settings: &SqlTrendSettings) -> Result<()> {
+        let connection = self.lock()?;
+        let value = serde_json::to_string(settings).context("encode SQL trend settings")?;
+        connection.execute(
+            r#"
+            INSERT INTO app_settings (key, value, updated_at)
+            VALUES ('sql_trends', ?1, ?2)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            "#,
+            params![value, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         self.connection
             .lock()
@@ -251,5 +288,21 @@ mod tests {
             .unwrap();
         assert_eq!(alarms.len(), 1);
         assert_eq!(alarms[0].occurrence_count, 4);
+    }
+
+    #[test]
+    fn stores_non_secret_sql_trend_settings() {
+        let directory = tempdir().unwrap();
+        let store = Store::open(&directory.path().join("test.sqlite3")).unwrap();
+        let settings = crate::sql_trends::SqlTrendSettings {
+            host: "sql.example.invalid".to_owned(),
+            database: "MetasysTrends".to_owned(),
+            username: "trend_reader".to_owned(),
+            ..Default::default()
+        };
+        store.save_sql_trend_settings(&settings).unwrap();
+        let loaded = store.sql_trend_settings().unwrap();
+        assert_eq!(loaded.host, "sql.example.invalid");
+        assert_eq!(loaded.database, "MetasysTrends");
     }
 }

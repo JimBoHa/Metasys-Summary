@@ -25,6 +25,10 @@
         <span id="health-badge" class="status-badge starting"><i></i> Connecting</span>
         <span id="last-updated" class="last-updated">Waiting for first poll</span>
       </div>
+      <button id="sql-settings-button" class="settings-button" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6l-.08.08h-4l-.08-.08a1.7 1.7 0 0 0-1-.6 1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1l-.08-.08v-4L4 9.84a1.7 1.7 0 0 0 .6-1 1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6l.08-.08h4l.08.08a1.7 1.7 0 0 0 1 .6 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.08.38.29.73.6 1l.08.08v4L20 14.16a1.7 1.7 0 0 0-.6.84Z"/></svg>
+        <span>SQL Trends</span>
+      </button>
       <button id="refresh-button" class="refresh-button" type="button">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6v5h-5M4 18v-5h5M18.7 9A7 7 0 0 0 6.1 6.1L4 8m16 8-2.1 1.9A7 7 0 0 1 5.3 15"/></svg>
         <span>Refresh</span>
@@ -114,6 +118,27 @@
         </div>
       </article>
 
+      <article class="panel span-12 chart-panel trend-panel">
+        <header class="panel-header">
+          <div><p class="panel-kicker">HISTORIAN</p><h2>SQL trend samples</h2></div>
+          <div class="trend-actions">
+            <label for="trend-range">Range</label>
+            <select id="trend-range">
+              <option value="24">24 hours</option>
+              <option value="168" selected>7 days</option>
+              <option value="336">14 days</option>
+              <option value="720">30 days</option>
+            </select>
+            <button id="load-trends-button" class="small-button" type="button">Load trends</button>
+          </div>
+        </header>
+        <div id="trend-message" class="trend-message">Configure a read-only SQL Server trend source from this Mac.</div>
+        <div class="chart-stage trend-stage">
+          <canvas id="sql-trend-chart" role="img" aria-label="Metasys SQL trend samples"></canvas>
+        </div>
+        <div id="sql-trend-legend" class="trend-legend"></div>
+      </article>
+
       <article class="panel span-4 chart-panel">
         <header class="panel-header"><div><p class="panel-kicker">DISTRIBUTION</p><h2>Alarms by type</h2></div></header>
         <div class="donut-layout">
@@ -155,6 +180,32 @@
       </article>
     </section>
   </main>
+
+  <dialog id="sql-settings-dialog" class="settings-dialog">
+    <form id="sql-settings-form" method="dialog">
+      <header class="dialog-header">
+        <div><p class="panel-kicker">LOCAL CONFIGURATION</p><h2>SQL trend source</h2></div>
+        <button id="sql-settings-close" class="icon-button" type="button" aria-label="Close SQL trend settings">×</button>
+      </header>
+      <p class="dialog-intro">Connect with a dedicated read-only SQL Server account. Password is saved only in macOS Keychain. Settings changes are accepted only from this Mac.</p>
+      <div id="sql-settings-message" class="form-message" role="status" aria-live="polite"></div>
+      <div class="form-grid">
+        <label class="checkbox-field full-field"><input id="sql-enabled" type="checkbox"> Enable SQL trend source</label>
+        <label>Server hostname or IP<input id="sql-host" name="host" required maxlength="253" placeholder="sql-server.example.invalid"></label>
+        <label>TCP port<input id="sql-port" name="port" type="number" min="1" max="65535" value="1433" required></label>
+        <label>Database<input id="sql-database" name="database" required maxlength="128" placeholder="MetasysTrends"></label>
+        <label>Username<input id="sql-username" name="username" required maxlength="256" autocomplete="username" placeholder="trend_reader"></label>
+        <label class="full-field">Password<input id="sql-password" name="password" type="password" autocomplete="new-password" placeholder="Leave blank to keep Keychain password"><small id="sql-password-state">No password saved</small></label>
+        <label class="checkbox-field full-field"><input id="sql-trust-certificate" type="checkbox"> Trust SQL Server certificate (private/self-signed deployments only)</label>
+        <label class="checkbox-field full-field"><input id="sql-clear-password" type="checkbox"> Remove saved SQL password</label>
+        <label class="full-field">Read-only trend query<textarea id="sql-query" name="query" rows="10" required spellcheck="false"></textarea><small>Must return point_name, sample_time, sample_value, and unit. Use @P1 and @P2 for date bounds.</small></label>
+      </div>
+      <footer class="dialog-actions">
+        <button id="sql-test-button" class="secondary-button" type="button">Test saved connection</button>
+        <button id="sql-save-button" class="primary-button" type="submit">Save settings</button>
+      </footer>
+    </form>
+  </dialog>
 
   <footer>
     <span>Read-only monitoring dashboard</span>
