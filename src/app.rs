@@ -25,6 +25,10 @@ use crate::{
         PollData,
     },
     portal::models::{PortalMapView, PortalUserRecord, TemperatureReading},
+    sql_mirror::{
+        SqlMirrorSettingsUpdate, SqlMirrorSettingsView, SqlMirrorStatus,
+        inspect_configured_sql_mirror, sql_mirror_scheduler_loaded,
+    },
     sql_trends::{
         LivePointValue, LivePointValuesResponse, MAX_LIVE_POINT_VALUES, SqlTrendSettingsUpdate,
         SqlTrendSettingsView, TrendPointCatalog, TrendResponse, clear_sql_password,
@@ -426,6 +430,28 @@ impl AppState {
     pub async fn test_sql_trend_connection(&self) -> Result<()> {
         let settings = self.store.sql_trend_settings()?;
         test_connection(&settings).await
+    }
+
+    pub fn sql_mirror_settings(&self) -> Result<SqlMirrorSettingsView> {
+        let settings = self.store.sql_mirror_settings()?;
+        let runs = self.store.recent_sql_mirror_runs(12)?;
+        Ok(settings.view(runs, Utc::now(), sql_mirror_scheduler_loaded()))
+    }
+
+    pub fn update_sql_mirror_settings(
+        &self,
+        update: SqlMirrorSettingsUpdate,
+    ) -> Result<SqlMirrorSettingsView> {
+        let settings = update.validated_settings()?;
+        self.store.save_sql_mirror_settings(&settings)?;
+        self.sql_mirror_settings()
+    }
+
+    pub async fn verify_sql_mirror(&self) -> Result<SqlMirrorStatus> {
+        let settings = self.store.sql_mirror_settings()?;
+        tokio::task::spawn_blocking(move || inspect_configured_sql_mirror(&settings))
+            .await
+            .map_err(|error| anyhow::anyhow!("SQL mirror verification task failed: {error}"))?
     }
 
     pub async fn sql_trend_points(&self) -> Result<TrendPointCatalog> {

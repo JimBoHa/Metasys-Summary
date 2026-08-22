@@ -28,6 +28,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const canManageSettings = session.user.role === "admin";
     $("report-settings-button").hidden = !canManageSettings;
     $("sql-settings-button").hidden = !canManageSettings;
+    $("mirror-settings-button").hidden = !canManageSettings;
   } catch (_) {
     window.location.assign("/");
     return;
@@ -49,6 +50,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("sql-settings-close").addEventListener("click", () => closeSettingsDialog("sql-settings-dialog"));
   $("sql-settings-form").addEventListener("submit", saveSqlSettings);
   $("sql-test-button").addEventListener("click", testSqlConnection);
+  $("mirror-settings-button").addEventListener("click", openMirrorSettings);
+  $("mirror-settings-close").addEventListener("click", () => closeSettingsDialog("mirror-settings-dialog"));
+  $("mirror-settings-form").addEventListener("submit", saveMirrorSettings);
+  $("mirror-verify-button").addEventListener("click", verifyMirrorTarget);
   $("load-trend-points-button").addEventListener("click", loadTrendPoints);
   $("trend-point-search").addEventListener("input", renderTrendPointOptions);
   $("trend-point-select").addEventListener("change", updateTrendPointSelection);
@@ -80,6 +85,9 @@ function handleOperationsHash() {
   } else if (currentUserRole === "admin" && hash === "sql") {
     window.MetasysNavigation?.setActive("admin-sql");
     openSqlSettings();
+  } else if (currentUserRole === "admin" && hash === "mirror") {
+    window.MetasysNavigation?.setActive("admin-mirror");
+    openMirrorSettings();
   } else {
     window.MetasysNavigation?.setActive("operations");
   }
@@ -87,7 +95,7 @@ function handleOperationsHash() {
 
 function closeSettingsDialog(dialogId) {
   $(dialogId).close();
-  if (["#reports", "#sql"].includes(window.location.hash)) {
+  if (["#reports", "#sql", "#mirror"].includes(window.location.hash)) {
     window.history.replaceState(null, "", "/operations");
   }
   window.MetasysNavigation?.setActive("operations");
@@ -562,6 +570,140 @@ async function testSqlConnection() {
   } finally {
     button.disabled = false;
   }
+}
+
+async function openMirrorSettings() {
+  const dialog = $("mirror-settings-dialog");
+  showMirrorMessage("Loading settings and run history…");
+  if (!dialog.open) dialog.showModal();
+  try {
+    const response = await portalFetch("/api/settings/sql-mirror", { cache: "no-store" });
+    if (!response.ok) throw new Error(await apiError(response));
+    const settings = await response.json();
+    $("mirror-enabled").checked = settings.enabled;
+    $("mirror-target").value = settings.targetDatabase;
+    $("mirror-marker").value = settings.volumeMarker;
+    $("mirror-interval-hours").value = settings.intervalHours;
+    $("mirror-batch-size").value = settings.batchSize;
+    renderMirrorHealth(settings.health);
+    showMirrorMessage("");
+  } catch (error) {
+    showMirrorMessage(error.message || "Unable to load SQL mirror settings", true);
+  }
+}
+
+async function saveMirrorSettings(event) {
+  event.preventDefault();
+  const form = $("mirror-settings-form");
+  if (!form.reportValidity()) return;
+  const button = $("mirror-save-button");
+  button.disabled = true;
+  showMirrorMessage("Saving…");
+  const payload = {
+    enabled: $("mirror-enabled").checked,
+    targetDatabase: $("mirror-target").value,
+    volumeMarker: $("mirror-marker").value,
+    intervalHours: Number($("mirror-interval-hours").value),
+    batchSize: Number($("mirror-batch-size").value)
+  };
+  try {
+    const response = await portalFetch("/api/settings/sql-mirror", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    if (!response.ok) throw new Error(await apiError(response));
+    const settings = await response.json();
+    renderMirrorHealth(settings.health);
+    showMirrorMessage("Mirror settings saved. The hourly LaunchAgent will apply the new configuration.");
+  } catch (error) {
+    showMirrorMessage(error.message || "Unable to save SQL mirror settings", true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function verifyMirrorTarget() {
+  const button = $("mirror-verify-button");
+  button.disabled = true;
+  showMirrorMessage("Verifying the marker, DuckDB file, checkpoints, and mirrored table counts…");
+  try {
+    const response = await portalFetch("/api/settings/sql-mirror/verify", { method: "POST" });
+    if (!response.ok) throw new Error(await apiError(response));
+    const status = await response.json();
+    const checksPassed = status.checkpointsMatchStorage
+      && status.reportingCheckpointsMatchStorage
+      && status.operationalSnapshotCountsCoverSource;
+    if (!checksPassed) throw new Error("Mirror opened, but one or more checkpoint integrity checks failed");
+    showMirrorMessage(`Verification passed: ${numberFormat.format(status.totalMirroredRows)} rows across ${numberFormat.format(status.mirroredSourceDatabaseCount)} source databases.`);
+  } catch (error) {
+    showMirrorMessage(error.message || "SQL mirror verification failed", true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function renderMirrorHealth(health) {
+  const labels = {
+    disabled: "Disabled",
+    running: "Running",
+    healthy: "Healthy",
+    error: "Error",
+    overdue: "Overdue",
+    neverRun: "Not yet run"
+  };
+  const badge = $("mirror-health-state");
+  badge.className = `mirror-health-badge ${health.state}`;
+  badge.textContent = labels[health.state] || health.state;
+  setText("mirror-health-summary", health.message);
+  setText("mirror-scheduler-state", health.schedulerLoaded ? "Loaded" : "Not loaded");
+  setText("mirror-volume-state", health.volumeMarkerPresent
+    ? health.targetDatabasePresent ? "Mounted" : "Target missing"
+    : "Unavailable");
+  setText("mirror-last-success", health.lastSuccessAt ? formatTime(health.lastSuccessAt) : "Never");
+  setText("mirror-next-due", health.nextDueAt ? formatTime(health.nextDueAt) : "After first run");
+  setText("mirror-total-rows", health.totalMirroredRows == null ? "—" : numberFormat.format(health.totalMirroredRows));
+  setText("mirror-event-delta", health.eventRowsCopiedLastRun == null
+    ? "—"
+    : `+${numberFormat.format(health.eventRowsCopiedLastRun)}`);
+  setText("mirror-duration", health.lastDurationSeconds == null
+    ? "—"
+    : `${health.lastDurationSeconds.toLocaleString(undefined, { maximumFractionDigits: 1 })} sec`);
+  setText("mirror-integrity", health.integrityOk == null ? "Not checked" : health.integrityOk ? "Passed" : "Failed");
+
+  const errorReport = $("mirror-error-report");
+  errorReport.hidden = !health.lastError;
+  setText("mirror-error-text", health.lastError || "");
+
+  const list = $("mirror-run-list");
+  list.replaceChildren();
+  if (!health.recentRuns.length) {
+    const empty = document.createElement("p");
+    empty.textContent = "No scheduled attempts recorded";
+    list.append(empty);
+    return;
+  }
+  health.recentRuns.forEach((run) => {
+    const row = document.createElement("div");
+    row.className = "mirror-run-row";
+    const status = document.createElement("span");
+    status.className = `mirror-run-status ${run.status}`;
+    status.textContent = run.status;
+    const time = document.createElement("time");
+    time.dateTime = run.startedAt;
+    time.textContent = formatTime(run.startedAt);
+    const detail = document.createElement("span");
+    detail.textContent = run.errorMessage
+      || (run.eventRowsCopied == null ? "No row metrics" : `+${numberFormat.format(run.eventRowsCopied)} event rows`);
+    row.append(status, time, detail);
+    list.append(row);
+  });
+}
+
+function showMirrorMessage(message, isError = false) {
+  const element = $("mirror-settings-message");
+  element.textContent = message;
+  element.classList.toggle("error", isError);
 }
 
 async function loadTrendPoints() {

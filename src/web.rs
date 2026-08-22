@@ -19,6 +19,7 @@ use crate::{
         models::{PortalRole, PortalSession},
         web::{PortalError, require_authenticated_role, require_request_csrf},
     },
+    sql_mirror::SqlMirrorSettingsUpdate,
     sql_trends::{MAX_LIVE_POINT_VALUES, SqlTrendSettingsUpdate},
 };
 
@@ -72,6 +73,11 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(sql_settings).put(update_sql_settings),
         )
         .route("/api/settings/sql/test", post(test_sql_settings))
+        .route(
+            "/api/settings/sql-mirror",
+            get(sql_mirror_settings).put(update_sql_mirror_settings),
+        )
+        .route("/api/settings/sql-mirror/verify", post(verify_sql_mirror))
         .route("/api/trend-points", get(trend_points))
         .route("/api/trends", get(trends))
         .merge(crate::portal::web::routes())
@@ -341,6 +347,49 @@ async fn test_sql_settings(
         .await
         .map_err(PortalError::bad_gateway)?;
     Ok(Json(json!({"status": "connected"})))
+}
+
+async fn sql_mirror_settings(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> WebResult<Json<crate::sql_mirror::SqlMirrorSettingsView>> {
+    require_role(&state, &headers, &[PortalRole::Admin])?;
+    require_local_response(peer)?;
+    state
+        .sql_mirror_settings()
+        .map(Json)
+        .map_err(PortalError::dashboard)
+}
+
+async fn update_sql_mirror_settings(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(update): Json<SqlMirrorSettingsUpdate>,
+) -> WebResult<Json<crate::sql_mirror::SqlMirrorSettingsView>> {
+    let session = require_role(&state, &headers, &[PortalRole::Admin])?;
+    require_csrf(&headers, &session)?;
+    require_local_response(peer)?;
+    state
+        .update_sql_mirror_settings(update)
+        .map(Json)
+        .map_err(PortalError::bad_request)
+}
+
+async fn verify_sql_mirror(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> WebResult<Json<crate::sql_mirror::SqlMirrorStatus>> {
+    let session = require_role(&state, &headers, &[PortalRole::Admin])?;
+    require_csrf(&headers, &session)?;
+    require_local_response(peer)?;
+    state
+        .verify_sql_mirror()
+        .await
+        .map(Json)
+        .map_err(PortalError::bad_gateway)
 }
 
 #[derive(Deserialize)]
@@ -732,6 +781,80 @@ mod tests {
                 "protected route was exposed at {path}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn sql_mirror_settings_require_local_admin_and_csrf() {
+        let directory = tempdir().unwrap();
+        let database_path = directory.path().join("mirror-settings.sqlite3");
+        let store = Arc::new(Store::open(&database_path).unwrap());
+        let password_hash = hash_password("Portal-Test-47!").unwrap();
+        store
+            .create_portal_user(
+                "admin@example.test",
+                "Administrator",
+                PortalRole::Admin,
+                &password_hash,
+                &[],
+                &[],
+            )
+            .unwrap();
+        let state =
+            Arc::new(AppState::new(Arc::new(test_config(&database_path)), store.clone()).unwrap());
+        let app = router(state);
+
+        let unauthorized = call(
+            &app,
+            request(Method::GET, "/api/settings/sql-mirror", None, None),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let admin = login(&app, "admin@example.test").await;
+        let response = call(
+            &app,
+            request(Method::GET, "/api/settings/sql-mirror", None, Some(&admin)),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["intervalHours"], 1);
+        assert!(body["health"]["recentRuns"].as_array().unwrap().is_empty());
+
+        let update = json!({
+            "enabled": true,
+            "targetDatabase": "/Volumes/Mirror/Metasys/history.duckdb",
+            "volumeMarker": "/Volumes/Mirror/.metasys-storage-volume",
+            "intervalHours": 6,
+            "batchSize": 100000
+        });
+        let mut missing_csrf = request(
+            Method::PUT,
+            "/api/settings/sql-mirror",
+            Some(update.clone()),
+            Some(&admin),
+        );
+        missing_csrf.headers_mut().remove("x-csrf-token");
+        assert_eq!(
+            call(&app, missing_csrf).await.status(),
+            StatusCode::FORBIDDEN
+        );
+
+        let response = call(
+            &app,
+            request(
+                Method::PUT,
+                "/api/settings/sql-mirror",
+                Some(update),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["intervalHours"], 6);
+        assert_eq!(body["batchSize"], 100000);
+        assert_eq!(store.sql_mirror_settings().unwrap().interval_hours, 6);
     }
 
     async fn login(app: &Router, email: &str) -> Login {

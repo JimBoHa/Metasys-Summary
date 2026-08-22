@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.github.metasys-summary.sql-history-mirror</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PROGRAM__</string>
+    <string>run-scheduled-sql-mirror</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__WORKING_DIRECTORY__</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>3600</integer>
+  <key>ProcessType</key>
+  <string>Standard</string>
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>Nice</key>
+  <integer>5</integer>
+  <key>StandardOutPath</key>
+  <string>__LOG_DIRECTORY__/sql-history-mirror.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIRECTORY__/sql-history-mirror-error.log</string>
+</dict>
+</plist>

@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
     time::{Duration as StdDuration, Instant},
 };
@@ -133,7 +133,7 @@ pub struct SqlTrendSettingsUpdate {
     pub clear_password: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SqlTrendSettingsView {
     pub enabled: bool,
@@ -145,6 +145,73 @@ pub struct SqlTrendSettingsView {
     pub legacy_tls: bool,
     pub query: String,
     pub password_configured: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistorianTableInfo {
+    pub table_schema: String,
+    pub table_name: String,
+    pub row_count: i64,
+    pub reserved_bytes: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistorianColumnInfo {
+    pub table_schema: String,
+    pub table_name: String,
+    pub ordinal_position: i32,
+    pub column_name: String,
+    pub data_type: String,
+    pub max_length: i16,
+    pub precision: u8,
+    pub scale: u8,
+    pub nullable: bool,
+    pub identity: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistorianIndexColumnInfo {
+    pub table_schema: String,
+    pub table_name: String,
+    pub index_name: String,
+    pub primary_key: bool,
+    pub unique: bool,
+    pub key_ordinal: u8,
+    pub column_name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistorianDatabaseInspection {
+    pub tables: Vec<HistorianTableInfo>,
+    pub columns: Vec<HistorianColumnInfo>,
+    pub index_columns: Vec<HistorianIndexColumnInfo>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistorianMirrorReport {
+    pub target_database: String,
+    pub source_database: String,
+    pub catalog_tables_copied: usize,
+    pub catalog_rows_copied: u64,
+    pub event_rows_copied_this_run: u64,
+    pub event_rows_copied_total: u64,
+    pub source_event_rows_at_start: u64,
+    pub full_pass_completed: bool,
+    pub stopped_by_row_limit: bool,
+    #[serde(default)]
+    pub operational_databases_mirrored: usize,
+    #[serde(default)]
+    pub operational_rows_copied_this_run: u64,
+    #[serde(default)]
+    pub reporting_rows_copied_total: u64,
+    #[serde(default)]
+    pub operational_pass_completed: bool,
+    pub duration_seconds: f64,
 }
 
 impl SqlTrendSettingsUpdate {
@@ -419,6 +486,18 @@ enum LegacyRequest<'a> {
         connection: LegacyConnection<'a>,
         password: String,
     },
+    Inspect {
+        connection: LegacyConnection<'a>,
+        password: String,
+    },
+    Mirror {
+        connection: LegacyConnection<'a>,
+        password: String,
+        target_database: &'a Path,
+        volume_marker: &'a Path,
+        batch_size: usize,
+        max_event_rows: Option<u64>,
+    },
 }
 
 #[derive(Deserialize)]
@@ -432,6 +511,12 @@ enum LegacyResponse {
     Points {
         points: Vec<TrendPoint>,
         truncated: bool,
+    },
+    Inspection {
+        inspection: HistorianDatabaseInspection,
+    },
+    Mirror {
+        report: HistorianMirrorReport,
     },
 }
 
@@ -481,6 +566,222 @@ pub async fn test_connection(settings: &SqlTrendSettings) -> Result<()> {
         .context("read SQL Server connection test")?
         .context("SQL Server connection test returned no data")?;
     Ok(())
+}
+
+pub async fn inspect_historian_database(
+    settings: &SqlTrendSettings,
+) -> Result<HistorianDatabaseInspection> {
+    settings.validate()?;
+    if !settings.enabled {
+        bail!("SQL trend source is disabled");
+    }
+    if settings.legacy_tls {
+        return match run_legacy_helper(LegacyRequest::Inspect {
+            connection: legacy_connection(settings),
+            password: read_sql_password()?,
+        })
+        .await?
+        {
+            LegacyResponse::Inspection { inspection } => Ok(inspection),
+            _ => bail!("legacy SQL helper returned an unexpected inspection response"),
+        };
+    }
+
+    let mut client = connect(settings).await?;
+    let query = client
+        .simple_query(
+            r#"
+            SELECT
+                CAST(s.name AS nvarchar(128)) AS table_schema,
+                CAST(t.name AS nvarchar(128)) AS table_name,
+                counts.row_count,
+                storage.reserved_bytes
+            FROM sys.tables AS t
+            JOIN sys.schemas AS s ON s.schema_id = t.schema_id
+            CROSS APPLY (
+                SELECT CAST(COALESCE(SUM(CASE WHEN p.index_id IN (0, 1) THEN p.rows ELSE 0 END), 0) AS bigint) AS row_count
+                FROM sys.partitions AS p
+                WHERE p.object_id = t.object_id
+            ) AS counts
+            CROSS APPLY (
+                SELECT CAST(COALESCE(SUM(a.total_pages), 0) * 8192 AS bigint) AS reserved_bytes
+                FROM sys.partitions AS p
+                JOIN sys.allocation_units AS a
+                  ON a.container_id = p.hobt_id OR a.container_id = p.partition_id
+                WHERE p.object_id = t.object_id
+            ) AS storage
+            WHERE t.is_ms_shipped = 0
+            ORDER BY s.name, t.name
+            "#,
+        )
+        .await
+        .context("inspect SQL Server historian tables")?;
+    let mut rows = query.into_row_stream();
+    let mut tables = Vec::new();
+    while let Some(row) = rows
+        .try_next()
+        .await
+        .context("read historian table metadata")?
+    {
+        tables.push(HistorianTableInfo {
+            table_schema: required_text(&row, "table_schema")?,
+            table_name: required_text(&row, "table_name")?,
+            row_count: row
+                .try_get::<i64, _>("row_count")?
+                .context("historian table metadata returned a null row_count")?,
+            reserved_bytes: row
+                .try_get::<i64, _>("reserved_bytes")?
+                .context("historian table metadata returned a null reserved_bytes")?,
+        });
+    }
+    drop(rows);
+
+    let query = client
+        .simple_query(
+            r#"
+            SELECT
+                CAST(s.name AS nvarchar(128)) AS table_schema,
+                CAST(t.name AS nvarchar(128)) AS table_name,
+                c.column_id AS ordinal_position,
+                CAST(c.name AS nvarchar(128)) AS column_name,
+                CAST(ty.name AS nvarchar(128)) AS data_type,
+                c.max_length,
+                c.precision,
+                c.scale,
+                c.is_nullable,
+                c.is_identity
+            FROM sys.tables AS t
+            JOIN sys.schemas AS s ON s.schema_id = t.schema_id
+            JOIN sys.columns AS c ON c.object_id = t.object_id
+            JOIN sys.types AS ty ON ty.user_type_id = c.user_type_id
+            WHERE t.is_ms_shipped = 0
+            ORDER BY s.name, t.name, c.column_id
+            "#,
+        )
+        .await
+        .context("inspect SQL Server historian columns")?;
+    let mut rows = query.into_row_stream();
+    let mut columns = Vec::new();
+    while let Some(row) = rows
+        .try_next()
+        .await
+        .context("read historian column metadata")?
+    {
+        columns.push(HistorianColumnInfo {
+            table_schema: required_text(&row, "table_schema")?,
+            table_name: required_text(&row, "table_name")?,
+            ordinal_position: row
+                .try_get::<i32, _>("ordinal_position")?
+                .context("historian column metadata returned a null ordinal_position")?,
+            column_name: required_text(&row, "column_name")?,
+            data_type: required_text(&row, "data_type")?,
+            max_length: row
+                .try_get::<i16, _>("max_length")?
+                .context("historian column metadata returned a null max_length")?,
+            precision: row
+                .try_get::<u8, _>("precision")?
+                .context("historian column metadata returned a null precision")?,
+            scale: row
+                .try_get::<u8, _>("scale")?
+                .context("historian column metadata returned a null scale")?,
+            nullable: row
+                .try_get::<bool, _>("is_nullable")?
+                .context("historian column metadata returned a null is_nullable")?,
+            identity: row
+                .try_get::<bool, _>("is_identity")?
+                .context("historian column metadata returned a null is_identity")?,
+        });
+    }
+    drop(rows);
+
+    let query = client
+        .simple_query(
+            r#"
+            SELECT
+                CAST(s.name AS nvarchar(128)) AS table_schema,
+                CAST(t.name AS nvarchar(128)) AS table_name,
+                CAST(i.name AS nvarchar(128)) AS index_name,
+                i.is_primary_key,
+                i.is_unique,
+                ic.key_ordinal,
+                CAST(c.name AS nvarchar(128)) AS column_name
+            FROM sys.tables AS t
+            JOIN sys.schemas AS s ON s.schema_id = t.schema_id
+            JOIN sys.indexes AS i ON i.object_id = t.object_id
+            JOIN sys.index_columns AS ic
+              ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+            JOIN sys.columns AS c
+              ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+            WHERE t.is_ms_shipped = 0
+              AND i.is_hypothetical = 0
+              AND ic.is_included_column = 0
+              AND ic.key_ordinal > 0
+            ORDER BY s.name, t.name, i.index_id, ic.key_ordinal
+            "#,
+        )
+        .await
+        .context("inspect SQL Server historian indexes")?;
+    let mut rows = query.into_row_stream();
+    let mut index_columns = Vec::new();
+    while let Some(row) = rows
+        .try_next()
+        .await
+        .context("read historian index metadata")?
+    {
+        index_columns.push(HistorianIndexColumnInfo {
+            table_schema: required_text(&row, "table_schema")?,
+            table_name: required_text(&row, "table_name")?,
+            index_name: required_text(&row, "index_name")?,
+            primary_key: row
+                .try_get::<bool, _>("is_primary_key")?
+                .context("historian index metadata returned a null is_primary_key")?,
+            unique: row
+                .try_get::<bool, _>("is_unique")?
+                .context("historian index metadata returned a null is_unique")?,
+            key_ordinal: row
+                .try_get::<u8, _>("key_ordinal")?
+                .context("historian index metadata returned a null key_ordinal")?,
+            column_name: required_text(&row, "column_name")?,
+        });
+    }
+
+    Ok(HistorianDatabaseInspection {
+        tables,
+        columns,
+        index_columns,
+    })
+}
+
+pub async fn mirror_historian_database(
+    settings: &SqlTrendSettings,
+    target_database: &Path,
+    volume_marker: &Path,
+    batch_size: usize,
+    max_event_rows: Option<u64>,
+) -> Result<HistorianMirrorReport> {
+    settings.validate()?;
+    if !settings.enabled {
+        bail!("SQL trend source is disabled");
+    }
+    match run_legacy_mirror_helper(LegacyRequest::Mirror {
+        connection: legacy_connection(settings),
+        password: read_sql_password()?,
+        target_database,
+        volume_marker,
+        batch_size,
+        max_event_rows,
+    })
+    .await?
+    {
+        LegacyResponse::Mirror { report } => Ok(report),
+        _ => bail!("legacy SQL helper returned an unexpected mirror response"),
+    }
+}
+
+fn required_text(row: &tiberius::Row, column: &str) -> Result<String> {
+    row.try_get::<&str, _>(column)?
+        .map(str::to_owned)
+        .with_context(|| format!("historian metadata returned a null {column}"))
 }
 
 pub async fn fetch_trend_points(settings: &SqlTrendSettings) -> Result<TrendPointCatalog> {
@@ -918,6 +1219,41 @@ async fn run_legacy_helper(request: LegacyRequest<'_>) -> Result<LegacyResponse>
         );
     }
     serde_json::from_slice(&output.stdout).context("decode legacy SQL helper response")
+}
+
+async fn run_legacy_mirror_helper(request: LegacyRequest<'_>) -> Result<LegacyResponse> {
+    let encoded = serde_json::to_vec(&request).context("encode legacy SQL mirror request")?;
+    let helper = legacy_helper_path()?;
+    let mut child = Command::new(&helper)
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("start isolated legacy SQL helper {}", helper.display()))?;
+    let mut stdin = child.stdin.take().context("open legacy SQL helper input")?;
+    stdin
+        .write_all(&encoded)
+        .await
+        .context("send legacy SQL mirror request")?;
+    stdin
+        .shutdown()
+        .await
+        .context("close legacy SQL mirror request")?;
+    drop(stdin);
+
+    let output = child
+        .wait_with_output()
+        .await
+        .context("wait for legacy SQL mirror helper")?;
+    if !output.status.success() {
+        bail!(
+            "legacy SQL mirror failed (helper exited with {})",
+            output.status
+        );
+    }
+    serde_json::from_slice(&output.stdout).context("decode legacy SQL mirror response")
 }
 
 fn legacy_helper_path() -> Result<PathBuf> {

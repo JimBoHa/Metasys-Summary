@@ -18,7 +18,10 @@ jobs:
   verify:
     name: Verify on macOS
     runs-on: macos-latest
-    timeout-minutes: 20
+    # A cold macOS runner compiles bundled DuckDB twice (dashboard and legacy
+    # helper); both test suites alone take about 20 minutes before Clippy and
+    # the smoke build run. Keep a finite guard while allowing clean builds.
+    timeout-minutes: 60
     env:
       CARGO_TERM_COLOR: always
       DUCKDB_DOWNLOAD_LIB: "1"
