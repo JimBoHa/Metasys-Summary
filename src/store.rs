@@ -9,6 +9,7 @@ use crate::{
     email_reports::EmailReportSettings,
     inventory::{EquipmentGroup, EquipmentInventory, EquipmentItem, EquipmentPoint},
     models::AlarmRecord,
+    sql_mirror::{SqlMirrorRunRecord, SqlMirrorSettings},
     sql_trends::SqlTrendSettings,
 };
 
@@ -80,6 +81,25 @@ impl Store {
                     value TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS sql_mirror_run_log (
+                    run_id TEXT PRIMARY KEY,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    status TEXT NOT NULL,
+                    target_database TEXT NOT NULL,
+                    volume_marker TEXT NOT NULL,
+                    duration_ms INTEGER,
+                    event_rows_copied INTEGER,
+                    event_rows_total INTEGER,
+                    source_event_rows INTEGER,
+                    total_mirrored_rows INTEGER,
+                    integrity_ok INTEGER,
+                    error_message TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_sql_mirror_run_log_started_at
+                    ON sql_mirror_run_log(started_at DESC);
 
                 CREATE TABLE IF NOT EXISTS report_delivery_log (
                     attempted_at TEXT PRIMARY KEY,
@@ -387,6 +407,176 @@ impl Store {
             params![value, Utc::now().to_rfc3339()],
         )?;
         Ok(())
+    }
+
+    pub fn sql_mirror_settings(&self) -> Result<SqlMirrorSettings> {
+        let connection = self.lock()?;
+        let value: Option<String> = connection
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'sql_mirror'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        value
+            .map(|value| serde_json::from_str(&value).context("decode SQL mirror settings"))
+            .transpose()
+            .map(Option::unwrap_or_default)
+    }
+
+    pub fn save_sql_mirror_settings(&self, settings: &SqlMirrorSettings) -> Result<()> {
+        settings.validate()?;
+        let connection = self.lock()?;
+        let value = serde_json::to_string(settings).context("encode SQL mirror settings")?;
+        connection.execute(
+            r#"
+            INSERT INTO app_settings (key, value, updated_at)
+            VALUES ('sql_mirror', ?1, ?2)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            "#,
+            params![value, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn begin_sql_mirror_run(
+        &self,
+        run_id: &str,
+        settings: &SqlMirrorSettings,
+        started_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let connection = self.lock()?;
+        connection.execute(
+            r#"
+            INSERT INTO sql_mirror_run_log (
+                run_id, started_at, status, target_database, volume_marker
+            ) VALUES (?1, ?2, 'running', ?3, ?4)
+            "#,
+            params![
+                run_id,
+                started_at.to_rfc3339(),
+                settings.target_database,
+                settings.volume_marker
+            ],
+        )?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn finish_sql_mirror_run(
+        &self,
+        run_id: &str,
+        status: &str,
+        finished_at: DateTime<Utc>,
+        duration_ms: u64,
+        event_rows_copied: Option<u64>,
+        event_rows_total: Option<u64>,
+        source_event_rows: Option<u64>,
+        total_mirrored_rows: Option<u64>,
+        integrity_ok: Option<bool>,
+        error_message: Option<&str>,
+    ) -> Result<()> {
+        if !matches!(status, "succeeded" | "failed") {
+            return Err(anyhow!("invalid SQL mirror completion status '{status}'"));
+        }
+        let connection = self.lock()?;
+        let changed = connection.execute(
+            r#"
+            UPDATE sql_mirror_run_log
+            SET finished_at = ?2,
+                status = ?3,
+                duration_ms = ?4,
+                event_rows_copied = ?5,
+                event_rows_total = ?6,
+                source_event_rows = ?7,
+                total_mirrored_rows = ?8,
+                integrity_ok = ?9,
+                error_message = ?10
+            WHERE run_id = ?1 AND status = 'running'
+            "#,
+            params![
+                run_id,
+                finished_at.to_rfc3339(),
+                status,
+                sqlite_u64(duration_ms),
+                event_rows_copied.map(sqlite_u64),
+                event_rows_total.map(sqlite_u64),
+                source_event_rows.map(sqlite_u64),
+                total_mirrored_rows.map(sqlite_u64),
+                integrity_ok,
+                error_message.map(|message| message.chars().take(4_000).collect::<String>()),
+            ],
+        )?;
+        if changed != 1 {
+            return Err(anyhow!(
+                "SQL mirror run {run_id} was missing or no longer running"
+            ));
+        }
+        connection.execute(
+            r#"
+            DELETE FROM sql_mirror_run_log
+            WHERE run_id NOT IN (
+                SELECT run_id FROM sql_mirror_run_log
+                ORDER BY started_at DESC LIMIT 200
+            )
+            "#,
+            [],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_interrupted_sql_mirror_runs(&self, finished_at: DateTime<Utc>) -> Result<usize> {
+        let connection = self.lock()?;
+        connection
+            .execute(
+                r#"
+                UPDATE sql_mirror_run_log
+                SET finished_at = ?1,
+                    status = 'interrupted',
+                    duration_ms = CAST(MAX(0, (julianday(?1) - julianday(started_at)) * 86400000) AS INTEGER),
+                    error_message = 'Previous scheduler process ended before recording completion'
+                WHERE status = 'running'
+                "#,
+                [finished_at.to_rfc3339()],
+            )
+            .context("mark interrupted SQL mirror runs")
+    }
+
+    pub fn recent_sql_mirror_runs(&self, limit: usize) -> Result<Vec<SqlMirrorRunRecord>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            r#"
+            SELECT run_id, started_at, finished_at, status, target_database, volume_marker,
+                   duration_ms, event_rows_copied, event_rows_total, source_event_rows,
+                   total_mirrored_rows, integrity_ok, error_message
+            FROM sql_mirror_run_log
+            ORDER BY started_at DESC
+            LIMIT ?1
+            "#,
+        )?;
+        let rows = statement.query_map([limit.clamp(1, 200) as i64], |row| {
+            let started_at: String = row.get(1)?;
+            let finished_at: Option<String> = row.get(2)?;
+            Ok(SqlMirrorRunRecord {
+                run_id: row.get(0)?,
+                started_at: parse_stored_datetime(&started_at).unwrap_or_else(Utc::now),
+                finished_at: finished_at.as_deref().and_then(parse_stored_datetime),
+                status: row.get(3)?,
+                target_database: row.get(4)?,
+                volume_marker: row.get(5)?,
+                duration_ms: row.get::<_, Option<i64>>(6)?.map(nonnegative_sqlite_u64),
+                event_rows_copied: row.get::<_, Option<i64>>(7)?.map(nonnegative_sqlite_u64),
+                event_rows_total: row.get::<_, Option<i64>>(8)?.map(nonnegative_sqlite_u64),
+                source_event_rows: row.get::<_, Option<i64>>(9)?.map(nonnegative_sqlite_u64),
+                total_mirrored_rows: row.get::<_, Option<i64>>(10)?.map(nonnegative_sqlite_u64),
+                integrity_ok: row.get(11)?,
+                error_message: row.get(12)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("read SQL mirror run history")
     }
 
     pub fn metasys_connection_settings(&self) -> Result<Option<MetasysConnectionSettings>> {
@@ -758,6 +948,14 @@ fn parse_stored_datetime(value: &str) -> Option<DateTime<Utc>> {
         .map(|value| value.with_timezone(&Utc))
 }
 
+fn sqlite_u64(value: u64) -> i64 {
+    value.min(i64::MAX as u64) as i64
+}
+
+fn nonnegative_sqlite_u64(value: i64) -> u64 {
+    value.max(0) as u64
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
@@ -894,6 +1092,54 @@ mod tests {
         let loaded = store.sql_trend_settings().unwrap();
         assert_eq!(loaded.host, "sql.example.invalid");
         assert_eq!(loaded.database, "MetasysTrends");
+    }
+
+    #[test]
+    fn stores_sql_mirror_settings_and_bounded_run_health() {
+        let directory = tempdir().unwrap();
+        let store = Store::open(&directory.path().join("test.sqlite3")).unwrap();
+        let settings = crate::sql_mirror::SqlMirrorSettings {
+            enabled: true,
+            target_database: "/Volumes/Mirror/Metasys/history.duckdb".to_owned(),
+            volume_marker: "/Volumes/Mirror/.metasys-storage-volume".to_owned(),
+            interval_hours: 6,
+            batch_size: 100_000,
+        };
+        store.save_sql_mirror_settings(&settings).unwrap();
+        assert_eq!(store.sql_mirror_settings().unwrap(), settings);
+
+        let started_at = Utc::now() - chrono::Duration::minutes(3);
+        store
+            .begin_sql_mirror_run("run-success", &settings, started_at)
+            .unwrap();
+        store
+            .finish_sql_mirror_run(
+                "run-success",
+                "succeeded",
+                Utc::now(),
+                180_000,
+                Some(42),
+                Some(5_000),
+                Some(5_000),
+                Some(7_500),
+                Some(true),
+                None,
+            )
+            .unwrap();
+        store
+            .begin_sql_mirror_run("run-interrupted", &settings, Utc::now())
+            .unwrap();
+        assert_eq!(
+            store.mark_interrupted_sql_mirror_runs(Utc::now()).unwrap(),
+            1
+        );
+
+        let runs = store.recent_sql_mirror_runs(10).unwrap();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].status, "interrupted");
+        assert!(runs[0].error_message.as_deref().unwrap().contains("ended"));
+        assert_eq!(runs[1].event_rows_copied, Some(42));
+        assert_eq!(runs[1].integrity_ok, Some(true));
     }
 
     #[test]

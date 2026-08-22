@@ -1,4 +1,10 @@
-use std::{collections::BTreeSet, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeSet,
+    net::SocketAddr,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -9,15 +15,18 @@ use metasys_dashboard::{
     history_migration::migrate_sqlite_history,
     metasys::MetasysClient,
     portal::{auth::hash_password, models::PortalRole},
+    sql_mirror::{inspect_configured_sql_mirror, inspect_sql_mirror},
     sql_trends::{
         FEATURED_TREND_POINT_FAMILIES, SqlTrendSettings, fetch_live_point_values,
-        fetch_trend_points, fetch_trends, set_sql_password, test_connection,
+        fetch_trend_points, fetch_trends, inspect_historian_database, mirror_historian_database,
+        set_sql_password, test_connection,
     },
     store::Store,
     web,
 };
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
+use uuid::Uuid;
 
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -73,6 +82,34 @@ enum Command {
     },
     /// Verify the saved SQL connection, point catalog, and one read-only trend query.
     CheckSql,
+    /// Print read-only SQL historian table, column, and index metadata as JSON.
+    InspectSqlHistory,
+    /// Mirror the complete SQL historian with resumable checkpoints on marked external storage.
+    MirrorSqlHistory {
+        /// DuckDB file on the external storage volume.
+        #[arg(long)]
+        target: PathBuf,
+        /// Marker file proving the intended external volume is mounted.
+        #[arg(long)]
+        volume_marker: PathBuf,
+        /// Rows committed per resumable event-data transaction.
+        #[arg(long, default_value = "100000")]
+        batch_size: usize,
+        /// Stop after this many rows in each large history stream; intended for validation.
+        #[arg(long)]
+        max_event_rows: Option<u64>,
+    },
+    /// Check DuckDB mirror integrity and resumable-copy progress without changing it.
+    CheckSqlMirror {
+        #[arg(long)]
+        target: PathBuf,
+    },
+    /// Run the configured SQL mirror when its saved cadence is due.
+    RunScheduledSqlMirror {
+        /// Run now even if the configured cadence is not due.
+        #[arg(long)]
+        force: bool,
+    },
     /// Verify the local DuckDB history schema and report stored row counts.
     CheckHistory,
     /// Copy legacy alarm and poll history from SQLite into DuckDB.
@@ -148,6 +185,17 @@ async fn main() -> Result<()> {
             legacy_tls,
         ),
         Some(Command::CheckSql) => check_sql(config).await,
+        Some(Command::InspectSqlHistory) => inspect_sql_history(config).await,
+        Some(Command::MirrorSqlHistory {
+            target,
+            volume_marker,
+            batch_size,
+            max_event_rows,
+        }) => mirror_sql_history(config, target, volume_marker, batch_size, max_event_rows).await,
+        Some(Command::CheckSqlMirror { target }) => check_sql_mirror(target),
+        Some(Command::RunScheduledSqlMirror { force }) => {
+            run_scheduled_sql_mirror(config, force).await
+        }
         Some(Command::CheckHistory) => check_history(config),
         Some(Command::MigrateHistory {
             source,
@@ -164,6 +212,137 @@ async fn main() -> Result<()> {
             check_temperature(config, reference, attribute).await
         }
         None => serve(config, cli.open_browser || launched_from_app_bundle()).await,
+    }
+}
+
+async fn inspect_sql_history(config: Config) -> Result<()> {
+    config.ensure_data_directory()?;
+    let store = Store::open(&config.database_path)?;
+    let settings = store.sql_trend_settings()?;
+    let inspection = inspect_historian_database(&settings).await?;
+    println!("{}", serde_json::to_string_pretty(&inspection)?);
+    Ok(())
+}
+
+async fn mirror_sql_history(
+    config: Config,
+    target: PathBuf,
+    volume_marker: PathBuf,
+    batch_size: usize,
+    max_event_rows: Option<u64>,
+) -> Result<()> {
+    config.ensure_data_directory()?;
+    let store = Store::open(&config.database_path)?;
+    let settings = store.sql_trend_settings()?;
+    let report = mirror_historian_database(
+        &settings,
+        &target,
+        &volume_marker,
+        batch_size,
+        max_event_rows,
+    )
+    .await?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+fn check_sql_mirror(target: PathBuf) -> Result<()> {
+    let status = inspect_sql_mirror(&target)?;
+    println!("{}", serde_json::to_string_pretty(&status)?);
+    if !status.checkpoints_match_storage {
+        bail!("DuckDB mirror checkpoint totals do not match stored event rows");
+    }
+    if !status.reporting_checkpoints_match_storage {
+        bail!("DuckDB reporting checkpoint totals do not match stored rows");
+    }
+    if !status.operational_snapshot_counts_cover_source {
+        bail!("one or more mirrored SQL tables do not cover their captured source row counts");
+    }
+    Ok(())
+}
+
+async fn run_scheduled_sql_mirror(config: Config, force: bool) -> Result<()> {
+    config.ensure_data_directory()?;
+    let store = Store::open(&config.database_path)?;
+    let now = chrono::Utc::now();
+    let interrupted = store.mark_interrupted_sql_mirror_runs(now)?;
+    if interrupted > 0 {
+        tracing::warn!(interrupted, "recorded incomplete SQL mirror scheduler runs");
+    }
+    let mirror_settings = store.sql_mirror_settings()?;
+    let latest = store.recent_sql_mirror_runs(1)?.into_iter().next();
+    if !mirror_settings.enabled {
+        println!("SQL mirror schedule is disabled");
+        return Ok(());
+    }
+    if !force && !mirror_settings.is_due(now, latest.as_ref()) {
+        println!("SQL mirror schedule is not due");
+        return Ok(());
+    }
+
+    let run_id = Uuid::new_v4().to_string();
+    store.begin_sql_mirror_run(&run_id, &mirror_settings, now)?;
+    let started = Instant::now();
+    let result = async {
+        let sql_settings = store.sql_trend_settings()?;
+        let target_database = PathBuf::from(&mirror_settings.target_database);
+        let volume_marker = PathBuf::from(&mirror_settings.volume_marker);
+        let report = mirror_historian_database(
+            &sql_settings,
+            &target_database,
+            &volume_marker,
+            mirror_settings.batch_size,
+            None,
+        )
+        .await?;
+        let status = inspect_configured_sql_mirror(&mirror_settings)?;
+        Ok::<_, anyhow::Error>((report, status))
+    }
+    .await;
+    let finished_at = chrono::Utc::now();
+    let duration_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+
+    match result {
+        Ok((report, status)) => {
+            let integrity_ok = status.checkpoints_match_storage
+                && status.reporting_checkpoints_match_storage
+                && status.operational_snapshot_counts_cover_source;
+            let error_message = (!integrity_ok)
+                .then_some("SQL mirror completed, but its post-run integrity check failed");
+            store.finish_sql_mirror_run(
+                &run_id,
+                if integrity_ok { "succeeded" } else { "failed" },
+                finished_at,
+                duration_ms,
+                Some(report.event_rows_copied_this_run),
+                Some(report.event_rows_copied_total),
+                Some(report.source_event_rows_at_start),
+                Some(status.total_mirrored_rows),
+                Some(integrity_ok),
+                error_message,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if !integrity_ok {
+                bail!("SQL mirror post-run integrity check failed");
+            }
+            Ok(())
+        }
+        Err(error) => {
+            let details = format!("{error:#}");
+            store.finish_sql_mirror_run(
+                &run_id,
+                "failed",
+                finished_at,
+                duration_ms,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(&details),
+            )?;
+            Err(error)
+        }
     }
 }
 

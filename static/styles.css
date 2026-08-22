@@ -294,6 +294,34 @@ select:focus, input:focus, textarea:focus { border-color: var(--cyan); outline: 
 .primary-button:hover { background: #5ed8df; }
 .primary-button:disabled, .secondary-button:disabled { cursor: wait; opacity: .55; }
 
+.mirror-settings-dialog { width: min(900px, calc(100vw - 28px)); }
+.mirror-health { margin: 5px 21px 13px; padding: 16px; background: rgba(7, 20, 28, .72); border: 1px solid var(--border-soft); border-radius: 10px; }
+.mirror-health-heading { display: flex; align-items: center; justify-content: space-between; gap: 15px; }
+.mirror-health-heading h3 { margin: 3px 0 0; font-size: 16px; }
+.mirror-health-badge { padding: 6px 9px; color: var(--muted); background: rgba(117, 153, 170, .08); border: 1px solid rgba(117, 153, 170, .2); border-radius: 999px; font-size: 9px; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+.mirror-health-badge.healthy { color: var(--green); background: rgba(83, 209, 139, .08); border-color: rgba(83, 209, 139, .25); }
+.mirror-health-badge.running { color: var(--cyan); background: rgba(44, 199, 210, .08); border-color: rgba(44, 199, 210, .25); }
+.mirror-health-badge.error, .mirror-health-badge.overdue { color: #ff9296; background: rgba(239, 98, 106, .08); border-color: rgba(239, 98, 106, .25); }
+.mirror-health-badge.neverRun, .mirror-health-badge.disabled { color: var(--amber); background: rgba(242, 184, 75, .08); border-color: rgba(242, 184, 75, .25); }
+.mirror-health-summary { margin: 11px 0 13px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.mirror-health-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.mirror-health-grid > div { min-width: 0; padding: 10px; background: rgba(19, 42, 53, .54); border: 1px solid rgba(117, 153, 170, .1); border-radius: 7px; }
+.mirror-health-grid span { display: block; color: var(--muted-2); font-size: 8px; font-weight: 720; letter-spacing: .07em; text-transform: uppercase; }
+.mirror-health-grid strong { display: block; margin-top: 6px; overflow: hidden; color: #d8e5e9; font-size: 11px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.mirror-error-report { margin-top: 11px; padding: 11px; color: #ff9da1; background: rgba(239, 98, 106, .06); border: 1px solid rgba(239, 98, 106, .18); border-radius: 7px; font-size: 9px; }
+.mirror-error-report pre { max-height: 120px; margin: 7px 0 0; overflow: auto; color: #efb0b2; font: 9px/1.5 "SFMono-Regular", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mirror-run-history { margin-top: 13px; color: var(--muted); font-size: 9px; }
+.mirror-run-history > strong { letter-spacing: .07em; text-transform: uppercase; }
+.mirror-run-history p { margin: 9px 0 0; color: var(--muted-2); }
+.mirror-run-row { display: grid; grid-template-columns: 76px 145px minmax(0, 1fr); gap: 10px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid rgba(117, 153, 170, .08); }
+.mirror-run-row:last-child { border-bottom: 0; }
+.mirror-run-row time, .mirror-run-row > span:last-child { overflow: hidden; color: var(--muted-2); text-overflow: ellipsis; white-space: nowrap; }
+.mirror-run-status { color: var(--cyan); font-weight: 750; text-transform: uppercase; }
+.mirror-run-status.failed, .mirror-run-status.interrupted { color: #ff9296; }
+.mirror-run-status.succeeded { color: var(--green); }
+.mirror-form-grid { padding-top: 5px; }
+.mirror-form-grid input[spellcheck="false"] { font-family: "SFMono-Regular", Consolas, monospace; font-size: 10px; }
+
 .rank-list { max-height: 500px; overflow: auto; }
 .rank-item { display: grid; grid-template-columns: 29px minmax(0, 1fr) auto; align-items: center; gap: 10px; min-height: 61px; padding: 10px 17px; border-bottom: 1px solid rgba(117, 153, 170, .09); }
 .rank-item:last-child { border-bottom: 0; }
@@ -406,6 +434,9 @@ footer { display: flex; justify-content: space-between; gap: 20px; padding: 19px
   .form-grid { grid-template-columns: 1fr; }
   .full-field { grid-column: auto; }
   .schedule-grid, .section-checks { grid-template-columns: 1fr; }
+  .mirror-health-grid { grid-template-columns: 1fr 1fr; }
+  .mirror-run-row { grid-template-columns: 72px minmax(0, 1fr); }
+  .mirror-run-row > span:last-child { grid-column: 1 / -1; }
   .dialog-actions { flex-wrap: wrap; }
   footer { padding-inline: 14px; }
 }

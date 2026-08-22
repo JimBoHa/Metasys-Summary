@@ -44,6 +44,7 @@
           <a class="sidebar-link" data-nav-key="admin-metasys" href="/#admin/metasys"><span class="sidebar-link-icon">C</span><span>Metasys connection</span></a>
           <a class="sidebar-link" data-nav-key="admin-reports" href="/operations#reports"><span class="sidebar-link-icon">E</span><span>Email reports</span></a>
           <a class="sidebar-link" data-nav-key="admin-sql" href="/operations#sql"><span class="sidebar-link-icon">Q</span><span>SQL trend source</span></a>
+          <a class="sidebar-link" data-nav-key="admin-mirror" href="/operations#mirror"><span class="sidebar-link-icon">↻</span><span>History mirror</span></a>
         </div>
       </section>
     </nav>
@@ -73,6 +74,10 @@
       <button id="sql-settings-button" class="settings-button" type="button">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6l-.08.08h-4l-.08-.08a1.7 1.7 0 0 0-1-.6 1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1l-.08-.08v-4L4 9.84a1.7 1.7 0 0 0 .6-1 1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6l.08-.08h4l.08.08a1.7 1.7 0 0 0 1 .6 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.08.38.29.73.6 1l.08.08v4L20 14.16a1.7 1.7 0 0 0-.6.84Z"/></svg>
         <span>SQL Trends</span>
+      </button>
+      <button id="mirror-settings-button" class="settings-button" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h11v11H7z M4 4h11v3M4 4v11h3 M20 9v11H9v-3"/></svg>
+        <span>Mirror</span>
       </button>
       <button id="refresh-button" class="refresh-button" type="button">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6v5h-5M4 18v-5h5M18.7 9A7 7 0 0 0 6.1 6.1L4 8m16 8-2.1 1.9A7 7 0 0 1 5.3 15"/></svg>
@@ -318,6 +323,49 @@
       <footer class="dialog-actions">
         <button id="sql-test-button" class="secondary-button" type="button">Test saved connection</button>
         <button id="sql-save-button" class="primary-button" type="submit">Save settings</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="mirror-settings-dialog" class="settings-dialog mirror-settings-dialog">
+    <form id="mirror-settings-form" method="dialog">
+      <header class="dialog-header">
+        <div><p class="panel-kicker">LOCAL CONFIGURATION &amp; HEALTH</p><h2>SQL history mirror</h2></div>
+        <button id="mirror-settings-close" class="icon-button" type="button" aria-label="Close SQL history mirror settings">×</button>
+      </header>
+      <p class="dialog-intro">The LaunchAgent wakes hourly. This cadence controls when a resumable read-only SQL Server copy is due. Attempt history is kept locally so missing disks and interrupted jobs remain visible.</p>
+      <div id="mirror-settings-message" class="form-message" role="status" aria-live="polite"></div>
+
+      <section class="mirror-health" aria-labelledby="mirror-health-title">
+        <div class="mirror-health-heading">
+          <div><p class="panel-kicker">SCHEDULER HEALTH</p><h3 id="mirror-health-title">Latest status</h3></div>
+          <span id="mirror-health-state" class="mirror-health-badge">Loading</span>
+        </div>
+        <p id="mirror-health-summary" class="mirror-health-summary">Loading mirror health…</p>
+        <div class="mirror-health-grid">
+          <div><span>LaunchAgent</span><strong id="mirror-scheduler-state">—</strong></div>
+          <div><span>External volume</span><strong id="mirror-volume-state">—</strong></div>
+          <div><span>Last success</span><strong id="mirror-last-success">—</strong></div>
+          <div><span>Next due</span><strong id="mirror-next-due">—</strong></div>
+          <div><span>Rows mirrored</span><strong id="mirror-total-rows">—</strong></div>
+          <div><span>Latest event delta</span><strong id="mirror-event-delta">—</strong></div>
+          <div><span>Run duration</span><strong id="mirror-duration">—</strong></div>
+          <div><span>Integrity</span><strong id="mirror-integrity">—</strong></div>
+        </div>
+        <div id="mirror-error-report" class="mirror-error-report" hidden><strong>Error report</strong><pre id="mirror-error-text"></pre></div>
+        <div class="mirror-run-history"><strong>Recent attempts</strong><div id="mirror-run-list"><p>No scheduled attempts recorded</p></div></div>
+      </section>
+
+      <div class="form-grid mirror-form-grid">
+        <label class="checkbox-field full-field"><input id="mirror-enabled" type="checkbox"> Enable scheduled SQL history mirroring</label>
+        <label class="full-field">DuckDB target<input id="mirror-target" required maxlength="1024" spellcheck="false" placeholder="/Volumes/Storage/MetasysData/JCIHistorian.duckdb"><small>Must be an absolute .duckdb path beneath the marker's volume directory.</small></label>
+        <label class="full-field">External-volume marker<input id="mirror-marker" required maxlength="1024" spellcheck="false" placeholder="/Volumes/Storage/.metasys-storage-volume"><small>Prevents a disconnected external disk from redirecting the mirror onto this Mac.</small></label>
+        <label>Cadence (hours)<input id="mirror-interval-hours" type="number" min="1" max="168" value="1" required></label>
+        <label>Batch rows<input id="mirror-batch-size" type="number" min="10000" max="1000000" step="10000" value="250000" required></label>
+      </div>
+      <footer class="dialog-actions">
+        <button id="mirror-verify-button" class="secondary-button" type="button">Verify target now</button>
+        <button id="mirror-save-button" class="primary-button" type="submit">Save settings</button>
       </footer>
     </form>
   </dialog>

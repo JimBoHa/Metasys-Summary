@@ -109,6 +109,7 @@ csrf_token="$(node -e 'const fs=require("fs"); const body=JSON.parse(fs.readFile
 expect_status 200 "$smoke_directory/operations.html" --cookie "$smoke_directory/cookies.txt" "$base_url/operations"
 assert_contains "$smoke_directory/operations.html" "Operations Dashboard"
 assert_contains "$smoke_directory/operations.html" "primary-sidebar"
+assert_contains "$smoke_directory/operations.html" "SQL history mirror"
 expect_status 200 "$smoke_directory/trends.html" --cookie "$smoke_directory/cookies.txt" "$base_url/trends"
 assert_contains "$smoke_directory/trends.html" "Metasys Trend Analysis"
 expect_status 200 "$smoke_directory/diagnostics.html" --cookie "$smoke_directory/cookies.txt" "$base_url/diagnostics"
@@ -116,6 +117,9 @@ assert_contains "$smoke_directory/diagnostics.html" "System Diagnostics"
 expect_status 200 "$smoke_directory/dashboard.json" --cookie "$smoke_directory/cookies.txt" "$base_url/api/dashboard"
 expect_status 200 "$smoke_directory/diagnostics.json" --cookie "$smoke_directory/cookies.txt" "$base_url/api/diagnostics"
 assert_contains "$smoke_directory/diagnostics.json" '"summary"'
+expect_status 200 "$smoke_directory/sql-mirror-settings.json" --cookie "$smoke_directory/cookies.txt" "$base_url/api/settings/sql-mirror"
+assert_contains "$smoke_directory/sql-mirror-settings.json" '"intervalHours":1'
+assert_contains "$smoke_directory/sql-mirror-settings.json" '"recentRuns":[]'
 expect_status 403 "$smoke_directory/missing-csrf.json" --cookie "$smoke_directory/cookies.txt" --request POST --header "Sec-Fetch-Site: same-origin" "$base_url/api/refresh"
 expect_status 202 "$smoke_directory/refresh.json" --cookie "$smoke_directory/cookies.txt" --request POST --header "Sec-Fetch-Site: same-origin" --header "X-CSRF-Token: $csrf_token" "$base_url/api/refresh"
 expect_status 200 "$smoke_directory/logout.json" --cookie "$smoke_directory/cookies.txt" --request POST --header "Sec-Fetch-Site: same-origin" --header "X-CSRF-Token: $csrf_token" "$base_url/api/portal/logout"

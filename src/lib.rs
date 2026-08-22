@@ -9,6 +9,7 @@ pub mod inventory;
 pub mod metasys;
 pub mod models;
 pub mod portal;
+pub mod sql_mirror;
 pub mod sql_trends;
 pub mod store;
 pub mod web;
